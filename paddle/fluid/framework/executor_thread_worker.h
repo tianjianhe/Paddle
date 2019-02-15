@@ -25,157 +25,61 @@ limitations under the License. */
 #include "paddle/fluid/framework/executor.h"
 #include "paddle/fluid/framework/program_desc.h"
 #include "paddle/fluid/framework/scope.h"
-#ifdef PADDLE_WITH_PSLIB
-#include <pslib.h>
-#endif
+#include "nccl.h"
 
 namespace paddle {
 namespace framework {
 
 void CreateTensor(Variable* var, proto::VarType::Type var_type);
-#ifdef PADDLE_WITH_PSLIB
-static const uint32_t MAX_FEASIGN_NUM = 1000 * 100 * 100;
-
-struct AsyncWorkerParamConfig {
-  int slot_dim;
-  int fea_dim;
-  int32_t tmp_push_dense_wait_times;
-  int32_t tmp_push_sparse_wait_times;
-
-  std::vector<std::string> skip_op;
-
-  std::map<uint64_t, std::vector<std::string>> dense_variable_name;
-  std::map<uint64_t, std::vector<std::string>> dense_gradient_variable_name;
-  std::vector<int> dense_table_id;
-  // fea_dim for each dense table
-  std::vector<uint32_t> dense_table_size;
-  std::vector<int> sparse_table_id;
-  std::map<uint64_t, std::vector<std::string>> slot_input_vec;
-  std::map<uint64_t, std::vector<std::string>> gradient_var;
-  std::map<std::string, uint64_t> slot_alias_to_table;
-};
-
-struct DensePullThreadParam {
-  std::shared_ptr<paddle::ps::PSClient> ps_client;
-  int threshold;
-  int training_thread_num;
-  Scope* root_scope;
-  std::map<uint64_t, std::vector<std::string>>* dense_params;
-  int sleep_time_ms = 2;
-};
-
-class DensePullThread {
- public:
-  explicit DensePullThread(const DensePullThreadParam& param)
-      : _running(false) {
-    _ps_client = param.ps_client;
-    _threshold = param.threshold;
-    _thread_num = param.training_thread_num;
-    _root_scope = param.root_scope;
-    _sleep_time_ms = param.sleep_time_ms;
-
-    for (auto& t : *param.dense_params) {
-      _dense_variable_name[t.first].insert(_dense_variable_name[t.first].end(),
-                                           t.second.begin(), t.second.end());
-      _training_versions[t.first].resize(_thread_num, 0);
-      _last_versions[t.first] = 0;
-      _current_version[t.first] = 0;
-    }
-  }
-
-  int start();
-
-  void stop() {
-    if (_running) {
-      _running = false;
-      _t.join();
-    }
-  }
-
-  void increase_thread_version(int thread_id, uint64_t table_id);
-  void reset_thread_version(uint64_t table_id);
-  std::future<int32_t> pull_dense(uint64_t table_id);
-  void pull_dense2(uint64_t table_id);
-  void wait_all();
-
- private:
-  void run();
-  bool check_update_param(uint64_t table_id);
-
- private:
-  std::shared_ptr<paddle::ps::PSClient> _ps_client;
-  int _thread_num;
-  int _threshold;
-  int _sleep_time_ms;
-  Scope* _root_scope;
-  bool _running;
-
-  std::map<uint64_t, uint64_t> _last_versions;
-  std::map<uint64_t, uint64_t> _current_version;
-  std::mutex _mutex_for_version;
-  std::map<uint64_t, std::vector<uint64_t>> _training_versions;
-  std::map<uint64_t, std::vector<std::string>> _dense_variable_name;
-
-  std::thread _t;
-
-  std::vector<::std::future<int32_t>> _pull_dense_status;
-
-  std::map<uint64_t, std::vector<paddle::ps::Region>> _regions;
-  uint32_t _pull_dense_fail_times = 0;
-
-  std::vector<float> _base_norm_param;
-  std::vector<float> _mean;
-  std::vector<float> _scale;
-  float _squared_sum_epsilon = 1e-4;
-  std::mutex _mutex_for_mean_scale;
-
-  float _total_batch_num = 0;
-};
-#endif
 
 class ExecutorThreadWorker {
  public:
-  ExecutorThreadWorker()
-      : thread_id_(-1), root_scope_(NULL), thread_scope_(NULL), debug_(false) {}
+  ExecutorThreadWorker(int nranks, int rank_id, int nscopes, int ncpu_calc_threads,
+      Scope* scope, const ProgramDesc& main_program_desc,
+      const std::vector<std::shared_ptr<DataFeed>>& readers,
+      const std::vector<std::string>& fetch_var_names,
+      std::shared_ptr<ncclUniqueId> nccl_id) : nranks_(nranks), rank_id_(rank_id),
+        nscopes_(nscopes), ncpu_calc_threads_(ncpu_calc_threads), readers_(readers),
+        root_scope_(scope) {
+    main_program_.reset(new ProgramDesc(main_program_desc));
+    fetch_var_names_.insert(fetch_var_names_.end(), fetch_var_names.begin(),
+                            fetch_var_names.end());
+    nccl_id_ = nccl_id;
+    cpu_place_ = platform::default_cpu();
+    gpu_place_ = platform::CUDAPlace(rank_id);
+  }
+
   virtual ~ExecutorThreadWorker() {}
 
-  void CreateThreadResource(const framework::ProgramDesc& program,
-                            const paddle::platform::Place& place);
-  void SetThreadId(int tid);
-  void SetDebug(const bool debug) { debug_ = debug; }
-  void SetRootScope(Scope* g_scope);
-  // set cpu device in this function
-  // cpu binding is used by default
-  void SetDevice();
-  // since we read data into memory that can not be accessed by program
-  // we need to bind memory of data with corresponding variables in program
-  // this function should be called after data feed is set
-  void BindingDataFeedMemory();
-  // set data feed declared in executor
-  void SetDataFeed(const std::shared_ptr<DataFeed>& datafeed);
+  void CreateThreadResource(const framework::ProgramDesc& program);
+
   // A multi-thread training function
   virtual void TrainFiles();
-  // with timer log
-  virtual void TrainFilesWithTimer();
-  // set fetch variable names from python interface assigned by users
-  void SetFetchVarNames(const std::vector<std::string>& fetch_var_names);
-#ifdef PADDLE_WITH_PSLIB
-  virtual void SetPSlibPtr(
-      std::shared_ptr<paddle::distributed::PSlib> pslib_ptr) {}
-  virtual void SetPullDenseThread(std::shared_ptr<DensePullThread> dpt) {}
-  virtual void SetParamConfig(AsyncWorkerParamConfig* param_config) {}
-#endif
 
  private:
   void CreateThreadScope(const framework::ProgramDesc& program);
   void CreateThreadOperators(const framework::ProgramDesc& program);
-  void SetMainProgram(const ProgramDesc& main_program_desc);
-  void SetPlace(const paddle::platform::Place& place);
+
+  void LookupTable(Scope* scope);
+  void LookupTableGrad(Scope* scope);
+  void LookupTableSumConcat(Scope* scope);
+  void LookupTableSumConcatGrad(Scope* scope);
+  void StartReaders();
+  void StartEmbFFThreads();
+  void StartGPUCalcThread();
+  void StartEmbBPThreads();
 
  protected:
-  // thread index
-  std::shared_ptr<DataFeed> thread_reader_;  // shared queue, thread buffer
-  int thread_id_;
+  int nranks_;
+  int rank_id_;
+  int nscopes_;
+  int ncpu_calc_threads_;
+
+  cudaStream_t cuda_stream_;
+  std::shared_ptr<ncclUniqueId> nccl_id_;
+  ncclComm_t nccl_comm_;
+
+  std::vector<std::shared_ptr<DataFeed>> readers_;
   // operator name
   std::vector<std::string> op_names_;
   // thread level, local operators for forward and backward
@@ -183,63 +87,23 @@ class ExecutorThreadWorker {
   // main program for training
   std::unique_ptr<framework::ProgramDesc> main_program_;
   // execution place
-  platform::Place place_;
+  platform::Place cpu_place_;
+  platform::Place gpu_place_;
+
   // root scope for model parameters
   Scope* root_scope_;
-  // a thread scope, father scope is global score which is shared
-  Scope* thread_scope_;
+  std::shared_ptr<Scope> thread_scope_;
+  std::shared_ptr<operators::reader::BlockingQueue<DataFeed*>> reader_queue_;
+  std::shared_ptr<operators::reader::BlockingQueue<Scope*>> emb_ff_scope_queue_;
+  std::shared_ptr<operators::reader::BlockingQueue<Scope*>> emb_bp_scope_queue_;
+  std::shared_ptr<operators::reader::BlockingQueue<Scope*>> scope_pool_;
+
   std::vector<std::string> fetch_var_names_;
   std::vector<std::vector<float>> fetch_values_;
-  bool debug_;
+  std::vector<std::thread> all_threads_;
+  std::vector<std::string> ids_names_;
+  int64_t padding_idx_{-1};
 };
-
-#ifdef PADDLE_WITH_PSLIB
-class AsyncExecutorThreadWorker : public ExecutorThreadWorker {
- public:
-  AsyncExecutorThreadWorker() {}
-  virtual ~AsyncExecutorThreadWorker() {}
-  void SetPSlibPtr(std::shared_ptr<paddle::distributed::PSlib> pslib_ptr);
-  void SetPullDenseThread(std::shared_ptr<DensePullThread> dpt);
-  void SetParamConfig(AsyncWorkerParamConfig* param_config);
-  void TrainFiles();
-  void TrainOneNetwork();
-  void PrepareParams();
-  void UpdateParams();
-  void PullSparse(int table_id);
-  void FillSparse(int table_id);
-  void PushSparse(int table_id);
-  void PushDense(int table_id);
-
-  void check_pull_push_memory(const std::vector<uint64_t>& features,
-                              std::vector<float*>* push_g, int dim);
-  void check_pull_push_memory(const std::vector<uint64_t>& features,
-                              std::vector<std::vector<float>>* push_g, int dim);
-  void collect_feasign_info(int table_id);
-
- private:
-  struct FeasignInfo {
-    uint32_t slot;
-    uint32_t ins;
-    int64_t label;
-  };
-
-  std::map<uint64_t, std::vector<uint64_t>> _features;
-  std::map<uint64_t, std::vector<FeasignInfo>> _fea_info;
-  std::map<uint64_t, std::vector<std::vector<float>>> _feature_value;
-  std::map<uint64_t, std::vector<std::vector<float>>> _feature_push_value;
-
-  std::shared_ptr<paddle::distributed::PSlib> _pslib_ptr;
-
-  std::shared_ptr<DensePullThread> _pull_dense_thread;
-
-  std::vector<::std::future<int32_t>> _pull_sparse_status;
-  std::vector<::std::future<int32_t>> _pull_dense_status;
-  std::vector<::std::future<int32_t>> _push_sparse_status;
-  std::vector<::std::future<int32_t>> _push_dense_status;
-
-  AsyncWorkerParamConfig* _param_config;
-};
-#endif
 
 }  // namespace framework
 }  // namespace paddle

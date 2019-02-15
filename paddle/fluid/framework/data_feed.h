@@ -26,9 +26,157 @@ limitations under the License. */
 #include "paddle/fluid/framework/reader.h"
 #include "paddle/fluid/framework/variable.h"
 #include "paddle/fluid/operators/reader/blocking_queue.h"
+#include "paddle/fluid/platform/timer.h"
 
 namespace paddle {
 namespace framework {
+
+//template <typename T>
+//class ReadWriteQueue {
+// public:
+//  explicit ReadWriteQueue(size_t capacity) 
+//      : capacity_(capacity), read_index_(0), write_index_(0), closed_(false) {
+//    PADDLE_ENFORCE_GT(capacity_, 0,
+//        "The capacity of a ReadWriteQueue must be greater than 0.");
+//    PADDLE_ENFORCE((capacity_ & (capacity_ - 1)) == 0, 
+//        "The capacity of a ReadWriteQueue must be 2^N.");
+//    ring_buffer_ = new T[capacity_];
+//  }
+//
+//  ~ReadWriteQueue() {
+//    delete[] ring_buffer_;
+//  }
+//
+//  bool Send(T&& elem) {
+//    size_t next_index = (write_index_ + 1) & (capacity_ - 1);
+//    if (next_index == read_index_) {
+//      std::unique_lock<std::mutex> lock(mutex_);
+//      LOG(ERROR) << "full";
+//      mutex_cv_.wait(lock, [&] { return next_index != read_index_ || closed_; });
+//    }
+//
+//    if (closed_) return false;
+//
+//    ring_buffer_[write_index_] = std::move(elem);
+//    write_index_ = next_index;
+//    mutex_cv_.notify_all();
+//    return true;
+//  }
+//
+//  bool Receive(T* elem) {
+//    if (read_index_ == write_index_) {
+//      std::unique_lock<std::mutex> lock(mutex_);
+//      mutex_cv_.wait(lock, [&] { return read_index_ != write_index_ || closed_; });
+//    }
+//
+//    if (closed_) return false;
+//
+//    *elem = std::move(ring_buffer_[read_index_]);
+//    read_index_ = (read_index_ + 1) & (capacity_ - 1);
+//    mutex_cv_.notify_all();
+//    return true;
+//  }
+//
+//  void Close() {
+//    closed_ = true;
+//    mutex_cv_.notify_all();
+//  }
+//
+//  bool IsClosed() const {
+//    return closed_;
+//  }
+//
+//  size_t Cap() const {
+//    return capacity_;
+//  }
+//
+// private:
+//  size_t capacity_;
+//	size_t read_index_;
+//  size_t write_index_;	
+//  bool closed_;
+//	T* ring_buffer_;
+//
+//  std::mutex mutex_;
+//  std::condition_variable mutex_cv_;
+//};
+
+template <typename T>
+class ReadWriteQueue {
+ public:
+  explicit ReadWriteQueue(size_t capacity) 
+      : capacity_(capacity), read_index_(capacity_), write_index_(0), closed_(false) {
+    PADDLE_ENFORCE_GT(capacity_, 0,
+        "The capacity of a ReadWriteQueue must be greater than 0.");
+    buffer_[0] = new T[capacity_];
+    buffer_[1] = new T[capacity_];
+    read_buffer_ = buffer_[0];
+    write_buffer_ = buffer_[1];
+  }
+
+  ~ReadWriteQueue() {
+    delete[] buffer_[0];
+    delete[] buffer_[1];
+    buffer_[0] = nullptr;
+    buffer_[1] = nullptr;
+  }
+
+  bool Send(T&& elem) {
+    if (write_index_ == capacity_) {
+      if (read_index_ != capacity_) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        mutex_cv_.wait(lock, [&] { return read_index_ == capacity_ || closed_; });
+      }
+
+      std::swap(write_buffer_, read_buffer_);
+      write_index_ = 0;
+      read_index_ = 0;
+      mutex_cv_.notify_one();
+    }
+
+    write_buffer_[write_index_] = std::move(elem);
+    ++write_index_;
+    return true;
+  }
+
+  bool Receive(T* elem) {
+    if (read_index_ == capacity_) {
+      mutex_cv_.notify_one();
+      std::unique_lock<std::mutex> lock(mutex_);
+      mutex_cv_.wait(lock, [&] { return read_index_ != capacity_ || closed_; });
+    }
+    if (closed_) return false;
+
+    *elem = std::move(read_buffer_[read_index_]);
+    ++read_index_;
+    return true;
+  }
+
+  void Close() {
+    closed_ = true;
+    mutex_cv_.notify_all();
+  }
+
+  bool IsClosed() const {
+    return closed_;
+  }
+
+  size_t Cap() const {
+    return capacity_;
+  }
+
+ private:
+  size_t capacity_;
+	size_t read_index_;
+  size_t write_index_;	
+  bool closed_;
+	T* buffer_[2];
+  T* read_buffer_;
+  T* write_buffer_;
+
+  std::mutex mutex_;
+  std::condition_variable mutex_cv_;
+};
 
 // DataFeed is the base virtual class for all ohther DataFeeds.
 // It is used to read files and parse the data for subsequent trainer.
@@ -73,6 +221,8 @@ class DataFeed {
   }
   // This function is used for binding feed_vec memory
   virtual void AddFeedVar(Variable* var, const std::string& name);
+  // This function is used for binding feed_vec memory in given scope
+  virtual void AssignFeedVar(const Scope& scope);
 
  protected:
   // The following three functions are used to check if it is executed in this
@@ -152,7 +302,15 @@ class PrivateQueueDataFeed : public DataFeed {
   std::ifstream file_;
   size_t queue_size_;
   // The queue for store parsed data
-  std::unique_ptr<paddle::operators::reader::BlockingQueue<T>> queue_;
+  //std::unique_ptr<paddle::operators::reader::BlockingQueue<T>> queue_;
+  std::unique_ptr<ReadWriteQueue<T>> queue_;
+
+  platform::Timer timer0_;
+  platform::Timer timer1_;
+  platform::Timer timer2_;
+  platform::Timer timer3_;
+  platform::Timer timer4_;
+  platform::Timer timer5_;
 };
 
 // This class define the data type of instance(ins_vec) in MultiSlotDataFeed
@@ -160,12 +318,18 @@ class MultiSlotType {
  public:
   MultiSlotType() {}
   ~MultiSlotType() {}
-  void Init(const std::string& type) {
+  void Init(const std::string& type, size_t reserved_size=0) {
     CheckType(type);
     if (type_[0] == 'f') {
       float_feasign_.clear();
+      if (reserved_size) {
+        float_feasign_.reserve(reserved_size);
+      }
     } else if (type_[0] == 'u') {
       uint64_feasign_.clear();
+      if (reserved_size) {
+        uint64_feasign_.reserve(reserved_size);
+      }
     }
     type_ = type;
   }

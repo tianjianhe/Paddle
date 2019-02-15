@@ -45,6 +45,10 @@ void Timer::Resume() {
   _paused = false;
 }
 
+bool Timer::IsPaused() {
+  return _paused;
+}
+
 int Timer::Count() { return _count; }
 
 double Timer::ElapsedUS() { return static_cast<double>(_elapsed); }

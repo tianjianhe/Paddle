@@ -38,6 +38,7 @@ class Timer {
   void Pause();
   // Resume will get current system time
   void Resume();
+  bool IsPaused();
   int Count();
   // return elapsed time in us
   double ElapsedUS();

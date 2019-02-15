@@ -38,6 +38,13 @@ void DataFeed::AddFeedVar(Variable* var, const std::string& name) {
   }
 }
 
+void DataFeed::AssignFeedVar(const Scope& scope) {
+  CheckInit();
+  for (size_t i = 0; i < use_slots_.size(); ++i) {
+    feed_vec_[i] = scope.FindVar(use_slots_[i])->GetMutable<LoDTensor>();
+  }
+}
+
 bool DataFeed::SetFileList(const std::vector<std::string>& files) {
   std::unique_lock<std::mutex> lock(mutex_for_pick_file_);
   CheckInit();
@@ -84,8 +91,7 @@ template <typename T>
 void PrivateQueueDataFeed<T>::SetQueueSize(int queue_size) {
   PADDLE_ENFORCE(queue_size > 0, "Illegal queue size: %d.", queue_size);
   queue_size_ = queue_size;
-  queue_ = std::unique_ptr<paddle::operators::reader::BlockingQueue<T>>(
-      new paddle::operators::reader::BlockingQueue<T>(queue_size_));
+  queue_ = std::unique_ptr<ReadWriteQueue<T>>(new ReadWriteQueue<T>(queue_size_));
 }
 
 template <typename T>
@@ -106,11 +112,22 @@ void PrivateQueueDataFeed<T>::ReadThread() {
     PADDLE_ENFORCE(file_.good(), "Open file<%s> fail.", filename.c_str());
     T instance;
     while (ParseOneInstance(&instance)) {
-      queue_->Send(instance);
+      timer4_.Pause();
+      timer5_.Resume();
+      queue_->Send(std::move(instance));
+      timer5_.Pause();
+      timer4_.Resume();
     }
+    timer4_.Pause();
     file_.close();
   }
   queue_->Close();
+  //LOG(ERROR) << "ReceiveBatchInstance: " << timer0_.ElapsedUS() / timer0_.Count() * default_batch_size_;
+  //LOG(ERROR) << "EmsembleBatchData: " << timer1_.ElapsedUS() / timer1_.Count() * default_batch_size_;
+  //LOG(ERROR) << "PutToFeedVec: " << timer2_.ElapsedUS() / timer2_.Count();
+  //LOG(ERROR) << "ParseBatchInstance: " << timer4_.ElapsedUS() / timer4_.Count() * default_batch_size_;
+  //LOG(ERROR) << "data parse in ParseBatchInstance: " << timer3_.ElapsedUS() / timer3_.Count() * default_batch_size_;
+  //LOG(ERROR) << "SendBatchInstance: " << timer5_.ElapsedUS() / timer5_.Count() * default_batch_size_;
 }
 
 template <typename T>
@@ -120,14 +137,20 @@ int PrivateQueueDataFeed<T>::Next() {
   T instance;
   T ins_vec;
   while (index < default_batch_size_) {
+    timer0_.Resume();
     if (!queue_->Receive(&instance)) {
       break;
     }
+    timer0_.Pause();
+    timer1_.Resume();
     AddInstanceToInsVec(&ins_vec, instance, index++);
+    timer1_.Pause();
   }
   batch_size_ = index;
   if (batch_size_ != 0) {
+    timer2_.Resume();
     PutToFeedVec(ins_vec);
+    timer2_.Pause();
   }
   return batch_size_;
 }
@@ -147,7 +170,8 @@ void MultiSlotDataFeed::Init(
   paddle::framework::MultiSlotDesc multi_slot_desc =
       data_feed_desc.multi_slot_desc();
   SetBatchSize(data_feed_desc.batch_size());
-  SetQueueSize(data_feed_desc.batch_size());
+  //SetQueueSize(data_feed_desc.batch_size());
+  SetQueueSize(data_feed_desc.batch_size() * 4);
   size_t all_slot_num = multi_slot_desc.slots_size();
   all_slots_.resize(all_slot_num);
   all_slots_type_.resize(all_slot_num);
@@ -282,6 +306,7 @@ bool MultiSlotDataFeed::CheckFile(const char* filename) {
 bool MultiSlotDataFeed::ParseOneInstance(std::vector<MultiSlotType>* instance) {
   std::string line;
   if (getline(file_, line)) {
+    timer3_.Resume();
     int use_slots_num = use_slots_.size();
     instance->resize(use_slots_num);
     // parse line
@@ -300,7 +325,7 @@ bool MultiSlotDataFeed::ParseOneInstance(std::vector<MultiSlotType>* instance) {
           str);
 
       if (idx != -1) {
-        (*instance)[idx].Init(all_slots_type_[i]);
+        (*instance)[idx].Init(all_slots_type_[i], static_cast<size_t>(num));
         if ((*instance)[idx].GetType()[0] == 'f') {  // float
           for (int j = 0; j < num; ++j) {
             float feasign = strtof(endptr, &endptr);
@@ -319,6 +344,7 @@ bool MultiSlotDataFeed::ParseOneInstance(std::vector<MultiSlotType>* instance) {
         }
       }
     }
+    timer3_.Pause();
   } else {
     return false;
   }

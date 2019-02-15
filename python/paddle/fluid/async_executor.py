@@ -93,10 +93,11 @@ class AsyncExecutor(object):
             program,
             data_feed,
             filelist,
-            thread_num,
             fetch,
-            mode="",
-            debug=False):
+            ncards,
+            nscopes,
+            nreaders,
+            ncpu_calc_threads):
         """
         Run program by this AsyncExecutor. Training dataset will be in filelist.
         Users can also inspect certain variables by naming them in parameter
@@ -142,8 +143,8 @@ class AsyncExecutor(object):
         if isinstance(filelist, str):
             filelist = [filelist]
 
-        if not isinstance(thread_num, int):
-            raise TypeError('TypeError: thread_num should be a positive number')
+        if not isinstance(ncards, int):
+            raise TypeError('TypeError: ncards should be a positive number')
 
         if fetch is not None:
             if isinstance(fetch, Variable):
@@ -158,8 +159,8 @@ class AsyncExecutor(object):
                         (fetch_var.name))
 
         self.executor.run_from_files(program_desc,
-                                     data_feed.desc(), filelist, thread_num,
-                                     fetch_var_names, mode, debug)
+                                     data_feed.desc(), filelist, fetch_var_names,
+                                     ncards, nscopes, nreaders, ncpu_calc_threads)
 
     def download_data(self,
                       afs_path,
