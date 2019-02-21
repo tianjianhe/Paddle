@@ -46,7 +46,8 @@ class AsyncExecutor {
                    const int ncards,
                    const int nscopes,
                    const int nreaders,
-                   const int ncpu_calc_threads);
+                   const int ncpu_calc_threads,
+                   const int nasync_steps);
   
  private:
   void InitRootScope(const ProgramDesc& program);

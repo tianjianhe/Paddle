@@ -97,7 +97,8 @@ class AsyncExecutor(object):
             ncards,
             nscopes,
             nreaders,
-            ncpu_calc_threads):
+            ncpu_calc_threads,
+            nasync_steps):
         """
         Run program by this AsyncExecutor. Training dataset will be in filelist.
         Users can also inspect certain variables by naming them in parameter
@@ -159,8 +160,8 @@ class AsyncExecutor(object):
                         (fetch_var.name))
 
         self.executor.run_from_files(program_desc,
-                                     data_feed.desc(), filelist, fetch_var_names,
-                                     ncards, nscopes, nreaders, ncpu_calc_threads)
+                                     data_feed.desc(), filelist, fetch_var_names, ncards,
+                                     nscopes, nreaders, ncpu_calc_threads, nasync_steps)
 
     def download_data(self,
                       afs_path,

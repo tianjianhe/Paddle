@@ -91,7 +91,9 @@ template <typename T>
 void PrivateQueueDataFeed<T>::SetQueueSize(int queue_size) {
   PADDLE_ENFORCE(queue_size > 0, "Illegal queue size: %d.", queue_size);
   queue_size_ = queue_size;
-  queue_ = std::unique_ptr<ReadWriteQueue<T>>(new ReadWriteQueue<T>(queue_size_));
+  //queue_ = std::unique_ptr<ReadWriteQueue<T>>(new ReadWriteQueue<T>(queue_size_));
+  queue_ = std::unique_ptr<paddle::operators::reader::BlockingQueue<T>>(
+      new paddle::operators::reader::BlockingQueue<T>(queue_size_));
 }
 
 template <typename T>

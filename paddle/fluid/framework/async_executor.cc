@@ -73,10 +73,8 @@ void AsyncExecutor::RunFromFile(const ProgramDesc& main_program,
                                 const std::string& data_feed_desc_str,
                                 const std::vector<std::string>& filelist,
                                 const std::vector<std::string>& fetch_var_names,
-                                const int ncards,
-                                const int nscopes,
-                                const int nreaders,
-                                const int ncpu_calc_threads) {
+                                const int ncards, const int nscopes, const int nreaders,
+                                const int ncpu_calc_threads, const int nasync_steps) {
   std::vector<std::thread> threads;
 
   auto& block = main_program.Block(0);
@@ -107,15 +105,15 @@ void AsyncExecutor::RunFromFile(const ProgramDesc& main_program,
   InitRootScope(main_program);
 
   std::shared_ptr<ncclUniqueId> nccl_id;
-  if (ncards > 1) {
-    nccl_id.reset(new ncclUniqueId);
-    platform::dynload::ncclGetUniqueId(nccl_id.get());
-  }
+  //if (ncards > 1) {
+  //  nccl_id.reset(new ncclUniqueId);
+  //  platform::dynload::ncclGetUniqueId(nccl_id.get());
+  //}
 
   std::vector<std::shared_ptr<ExecutorThreadWorker>> workers;
   for (int i = 0; i < actual_ncards; ++i) {
     workers.emplace_back(new ExecutorThreadWorker(actual_ncards, i, nscopes, ncpu_calc_threads,
-          root_scope_, main_program, readers[i], fetch_var_names, nccl_id));
+          nasync_steps, root_scope_, main_program, readers[i], fetch_var_names, nccl_id));
   }
 
   // prepare thread resource here

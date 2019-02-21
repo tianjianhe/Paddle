@@ -302,8 +302,8 @@ class PrivateQueueDataFeed : public DataFeed {
   std::ifstream file_;
   size_t queue_size_;
   // The queue for store parsed data
-  //std::unique_ptr<paddle::operators::reader::BlockingQueue<T>> queue_;
-  std::unique_ptr<ReadWriteQueue<T>> queue_;
+  std::unique_ptr<paddle::operators::reader::BlockingQueue<T>> queue_;
+  //std::unique_ptr<ReadWriteQueue<T>> queue_;
 
   platform::Timer timer0_;
   platform::Timer timer1_;

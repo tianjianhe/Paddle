@@ -25,6 +25,7 @@ limitations under the License. */
 #include "paddle/fluid/framework/executor.h"
 #include "paddle/fluid/framework/program_desc.h"
 #include "paddle/fluid/framework/scope.h"
+#include "paddle/fluid/platform/device_context.h"
 #include "nccl.h"
 
 namespace paddle {
@@ -35,18 +36,20 @@ void CreateTensor(Variable* var, proto::VarType::Type var_type);
 class ExecutorThreadWorker {
  public:
   ExecutorThreadWorker(int nranks, int rank_id, int nscopes, int ncpu_calc_threads,
-      Scope* scope, const ProgramDesc& main_program_desc,
+      int nasync_steps, Scope* scope, const ProgramDesc& main_program_desc,
       const std::vector<std::shared_ptr<DataFeed>>& readers,
       const std::vector<std::string>& fetch_var_names,
       std::shared_ptr<ncclUniqueId> nccl_id) : nranks_(nranks), rank_id_(rank_id),
-        nscopes_(nscopes), ncpu_calc_threads_(ncpu_calc_threads), readers_(readers),
-        root_scope_(scope) {
+        nscopes_(nscopes), ncpu_calc_threads_(ncpu_calc_threads), nasync_steps_(nasync_steps),
+        readers_(readers), root_scope_(scope) {
     main_program_.reset(new ProgramDesc(main_program_desc));
     fetch_var_names_.insert(fetch_var_names_.end(), fetch_var_names.begin(),
                             fetch_var_names.end());
     nccl_id_ = nccl_id;
     cpu_place_ = platform::default_cpu();
     gpu_place_ = platform::CUDAPlace(rank_id);
+    cpu_dev_ctx_.reset(new platform::CPUDeviceContext(cpu_place_));
+    gpu_dev_ctx_.reset(new platform::CUDADeviceContext(gpu_place_));
   }
 
   virtual ~ExecutorThreadWorker() {}
@@ -68,12 +71,14 @@ class ExecutorThreadWorker {
   void StartEmbFFThreads();
   void StartGPUCalcThread();
   void StartEmbBPThreads();
+  void AsyncUpdateParam();
 
  protected:
   int nranks_;
   int rank_id_;
   int nscopes_;
   int ncpu_calc_threads_;
+  int nasync_steps_;
 
   cudaStream_t cuda_stream_;
   std::shared_ptr<ncclUniqueId> nccl_id_;
@@ -87,12 +92,15 @@ class ExecutorThreadWorker {
   // main program for training
   std::unique_ptr<framework::ProgramDesc> main_program_;
   // execution place
-  platform::Place cpu_place_;
-  platform::Place gpu_place_;
+  std::shared_ptr<platform::CUDADeviceContext> gpu_dev_ctx_;
+  std::shared_ptr<platform::CPUDeviceContext> cpu_dev_ctx_;
+  platform::CPUPlace cpu_place_;
+  platform::CUDAPlace gpu_place_;
 
   // root scope for model parameters
   Scope* root_scope_;
   std::shared_ptr<Scope> thread_scope_;
+  std::shared_ptr<Scope> param_scope_;
   std::shared_ptr<operators::reader::BlockingQueue<DataFeed*>> reader_queue_;
   std::shared_ptr<operators::reader::BlockingQueue<Scope*>> emb_ff_scope_queue_;
   std::shared_ptr<operators::reader::BlockingQueue<Scope*>> emb_bp_scope_queue_;
@@ -102,6 +110,8 @@ class ExecutorThreadWorker {
   std::vector<std::vector<float>> fetch_values_;
   std::vector<std::thread> all_threads_;
   std::vector<std::string> ids_names_;
+  std::vector<std::string> param_names_;
+
   int64_t padding_idx_{-1};
 };
 

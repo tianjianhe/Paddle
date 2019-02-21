@@ -34,6 +34,7 @@ limitations under the License. */
 #include "paddle/fluid/func_profile.h"
 #include "paddle/fluid/platform/timer.h"
 #include "paddle/fluid/operators/math/blas.h"
+#include "paddle/fluid/framework/eigen.h"
 
 namespace paddle {
 namespace framework {
@@ -75,16 +76,31 @@ void ExecutorThreadWorker::CreateThreadScope(const ProgramDesc& program) {
   }
 
   thread_scope_.reset(new Scope);
+  param_scope_.reset(new Scope);
   for (auto& var : block.AllVars()) {
     if (var->Persistable()) {
-      PADDLE_ENFORCE(var->Name() != "embedding", "var->Name() == \"embedding\"");
-      auto& root_tensor = root_scope_->FindVar(var->Name())->Get<LoDTensor>();
-      auto* thread_tensor = thread_scope_->Var(var->Name())->GetMutable<LoDTensor>();
+      const std::string var_name = var->Name();
+      PADDLE_ENFORCE(var_name != "embedding", "var->Name() == \"embedding\"");
+
+      param_names_.push_back(var_name);
+
+      auto& root_tensor = root_scope_->FindVar(var_name)->Get<LoDTensor>();
+      auto* thread_tensor = thread_scope_->Var(var_name)->GetMutable<LoDTensor>();
       thread_tensor->Resize(root_tensor.dims());
       cudaMemcpy(thread_tensor->mutable_data<float>(gpu_place_),
           root_tensor.data<float>(),
           root_tensor.numel() * sizeof(float),
           cudaMemcpyHostToDevice);
+
+      auto* param_tensor = param_scope_->Var(var_name)->GetMutable<LoDTensor>();
+      param_tensor->Resize(root_tensor.dims());
+      cudaMemcpy(param_tensor->mutable_data<float>(gpu_place_),
+          root_tensor.data<float>(),
+          root_tensor.numel() * sizeof(float),
+          cudaMemcpyHostToDevice);
+
+      auto* delta_tensor = param_scope_->Var(var_name + "@DELTA")->GetMutable<LoDTensor>();
+      delta_tensor->Resize(root_tensor.dims());
     }
   }
 
@@ -157,9 +173,8 @@ static void print_fetch_var(Scope* scope, const std::string& var_name) {
 
 static const int user_slot_num = 73;
 static const int news_slot_num = 44;
-platform::CPUDeviceContext dev_ctx;
 void ExecutorThreadWorker::LookupTableSumConcat(Scope* scope) {
-  operators::math::BlasT<platform::CPUDeviceContext, float> blas(dev_ctx);
+  operators::math::BlasT<platform::CPUDeviceContext, float> blas(*cpu_dev_ctx_);
   const LoDTensor& embedding = root_scope_->FindVar("embedding")->Get<LoDTensor>();
   const float* table_data = embedding.data<float>();
   const DDim& dims = embedding.dims();
@@ -198,7 +213,7 @@ void ExecutorThreadWorker::LookupTableSumConcat(Scope* scope) {
 }
 
 void ExecutorThreadWorker::LookupTableSumConcatGrad(Scope* scope) {
-  operators::math::BlasT<platform::CPUDeviceContext, float> blas(dev_ctx);
+  operators::math::BlasT<platform::CPUDeviceContext, float> blas(*cpu_dev_ctx_);
   LoDTensor* embedding = root_scope_->FindVar("embedding")->GetMutable<LoDTensor>();
   float* table_data = embedding->mutable_data<float>(cpu_place_);
   const size_t emb_size = embedding->dims()[1];
@@ -290,15 +305,13 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
       int accum_num = 0;
       Scope* scope = nullptr;
       DataFeed* reader = nullptr;
-      std::string calc_key = std::string("emb_ff_calc_") + std::to_string(i);
-      std::string wait_key = std::string("emb_ff_wait_") + std::to_string(i);
-      std::string reader_key = std::string("reader_wait_") + std::to_string(i);
 
       platform::Timer timer;
       platform::Timer reader_timer;
       platform::Timer outer_timer;
       outer_timer.Start();
 	  	while (scope_pool_->Receive(&scope)) {
+        timer.Resume();
         reader_queue_->Receive(&reader);
 
         reader_timer.Resume();
@@ -313,48 +326,61 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
         reader_queue_->Send(reader);
         accum_num += batch_size;
 
-        timer.Resume();
         LookupTableSumConcat(scope);
-	  		emb_ff_scope_queue_->Send(scope);
         timer.Pause();
+
+	  		emb_ff_scope_queue_->Send(scope);
 
         ++cnt;
 	  	}
       outer_timer.Pause();
       emb_ff_scope_queue_->Close();
 
-      fprintf(stderr, "emb_ff reader_ratio:%.1f%% lookup_table_ratio:%.1f%%\n",
+      fprintf(stderr, "emb_ff_reader_ratio:%.1f%% emb_ff_ratio:%.1f%%\n",
           reader_timer.ElapsedSec() / outer_timer.ElapsedSec() * 100,
           timer.ElapsedSec() / outer_timer.ElapsedSec() * 100);
     }));
   }
 }
 
+template <typename T, int MajorType = Eigen::RowMajor, typename IndexType = Eigen::DenseIndex>
+using EigenVector = EigenVector<T, MajorType, IndexType>;
+
+void ExecutorThreadWorker::AsyncUpdateParam() {
+  for (const std::string& param_name : param_names_) {
+    LoDTensor* param_tensor = param_scope_->FindVar(param_name)->GetMutable<LoDTensor>();
+    LoDTensor* thread_tensor = thread_scope_->FindVar(param_name)->GetMutable<LoDTensor>();
+    auto param_tensor_e = EigenVector<float>::Flatten(*param_tensor);
+    auto thread_tensor_e = EigenVector<float>::Flatten(*thread_tensor);
+    if (false) param_tensor_e.device(*(gpu_dev_ctx_->eigen_device())) = thread_tensor_e - param_tensor_e;
+
+    LoDTensor* delta_tensor = param_scope_->FindVar(param_name + "@DELTA")->GetMutable<LoDTensor>();
+    cudaMemcpy(delta_tensor->mutable_data<float>(cpu_place_), param_tensor->data<float>(),
+        param_tensor->numel() * sizeof(float), cudaMemcpyDeviceToHost);
+
+    LoDTensor* root_tensor = root_scope_->FindVar(param_name)->GetMutable<LoDTensor>();
+    auto root_tensor_e = EigenVector<float>::Flatten(*root_tensor);
+    auto delta_tensor_e = EigenVector<float>::Flatten(*delta_tensor);
+    if (false) root_tensor_e.device(*(cpu_dev_ctx_->eigen_device())) = root_tensor_e + delta_tensor_e;
+
+    cudaMemcpy(param_tensor->mutable_data<float>(gpu_place_), root_tensor->data<float>(),
+        root_tensor->numel() * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(thread_tensor->mutable_data<float>(gpu_place_), param_tensor->data<float>(),
+        param_tensor->numel() * sizeof(float), cudaMemcpyDeviceToDevice);
+  }
+}
+
 void ExecutorThreadWorker::StartGPUCalcThread() {
   all_threads_.push_back(std::thread([this]() {
-    int cnt = 0;
+    int step_cnt = 0;
     int accum_num = 0;
     Scope* scope = nullptr;
-    std::string calc_key = std::string("gpu_calc");
-    std::string wait_key = std::string("gpu_wait");
-    std::string cp_key = std::string("gpu_cp");
-    std::string op_key = std::string("gpu_op");
     platform::Timer timer;
+    platform::Timer gpu_timer;
     platform::Timer outer_timer;
     platform::Timer sync_timer;
     outer_timer.Start();
   	while (emb_ff_scope_queue_->Receive(&scope)) {
-
-      //for (size_t i = 0; i < emb_cpu_names_.size(); ++i) {
-      //  const LoDTensor& emb_cpu = scope->FindVar(emb_cpu_names_[i])->Get<LoDTensor>();
-      //  LoDTensor* emb_gpu = scope->FindVar(emb_gpu_names_[i])->GetMutable<LoDTensor>();
-      //  emb_gpu->set_lod(emb_cpu.lod());
-      //  emb_gpu->Resize(emb_cpu.dims());
-      //  const float* emb_cpu_data = emb_cpu.data<float>();
-      //  float* emb_gpu_data = emb_gpu->mutable_data<float>(gpu_place_);//emb_gpu->mutable_data<float>(gpu_place_);
-      //  cudaMemcpy(emb_gpu_data, emb_cpu_data, emb_cpu.memory_size(), cudaMemcpyHostToDevice);
-      //}
- 
       timer.Resume();
       const LoDTensor& user_concat_cpu = scope->FindVar("user_concat_cpu")->Get<LoDTensor>();
       const LoDTensor& news_concat_cpu = scope->FindVar("news_concat_cpu")->Get<LoDTensor>();
@@ -370,33 +396,21 @@ void ExecutorThreadWorker::StartGPUCalcThread() {
       cudaMemcpy(news_concat_gpu_data, news_concat_cpu_data, news_concat_cpu.memory_size(), cudaMemcpyHostToDevice);
       accum_num += user_concat_cpu.dims()[0];
 
+      gpu_timer.Resume();
       for (auto& op : ops_) {
 #ifdef NCCL_SYNC_
         if (op->Type() == "sgd" && nranks_ > 1) {
-          timer.Pause();
-          sync_timer.Resume();
           LoDTensor* grad = scope->FindVar(op->Input("Grad"))->GetMutable<LoDTensor>();
           platform::dynload::ncclAllReduce(static_cast<void*>(grad->mutable_data<float>(gpu_place_)),
                 static_cast<void*>(grad->mutable_data<float>(gpu_place_)),
                 grad->numel() * sizeof(float), ncclFloat, ncclSum, nccl_comm_, cuda_stream_);
           CUDACHECK(cudaStreamSynchronize(cuda_stream_));
-          sync_timer.Pause();
-          timer.Resume();
         }
 #endif
         op->Run(*scope, gpu_place_);
       }
+      gpu_timer.Pause();
 
-      //for (size_t i = 0; i < emb_grad_gpu_names_.size(); ++i) {
-      //  const LoDTensor& emb_grad_gpu = scope->FindVar(emb_grad_gpu_names_[i])->Get<LoDTensor>();
-      //  LoDTensor* emb_grad_cpu = scope->Var(emb_grad_cpu_names_[i])->GetMutable<LoDTensor>();
-      //  emb_grad_cpu->set_lod(emb_grad_gpu.lod());
-      //  emb_grad_cpu->Resize(emb_grad_gpu.dims());
-      //  const float* emb_grad_gpu_data = emb_grad_gpu.data<float>();
-      //  float* emb_grad_cpu_data = emb_grad_cpu->mutable_data<float>(cpu_place_);//emb_grad_cpu->mutable_data<float>(cpu_place_);
-      //  cudaMemcpy(emb_grad_cpu_data, emb_grad_gpu_data, emb_grad_gpu.memory_size(), cudaMemcpyDeviceToHost);
-      //}
-    
       const LoDTensor& user_concat_grad_gpu = scope->FindVar("user_concat@GRAD")->Get<LoDTensor>();
       const LoDTensor& news_concat_grad_gpu = scope->FindVar("news_concat@GRAD")->Get<LoDTensor>();
       const float* user_concat_grad_gpu_data = user_concat_grad_gpu.data<float>();
@@ -411,16 +425,21 @@ void ExecutorThreadWorker::StartGPUCalcThread() {
       cudaMemcpy(news_concat_grad_cpu_data, news_concat_grad_gpu_data, news_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost);
 
       scope->DropKids();
-      timer.Pause();
   		emb_bp_scope_queue_->Send(scope);
 
-      ++cnt;//LOG(ERROR) << "t" << thread_id_ << " main loop " << ++cnt;
+      if (++step_cnt >= nasync_steps_) {
+        sync_timer.Resume();
+        AsyncUpdateParam();
+        step_cnt = 0;
+        sync_timer.Pause();
+      }
+      timer.Pause();
   	}
     emb_bp_scope_queue_->Close();
     outer_timer.Pause();
-    fprintf(stderr, "gpu_calc_ratio:%.1f%% gpu_sync_ratio:%.1f%%\n",
-        timer.ElapsedSec() / outer_timer.ElapsedSec() * 100,
-        sync_timer.ElapsedSec() / outer_timer.ElapsedSec() * 100);
+    fprintf(stderr, "pure_gpu_ratio:%.1f%% gpu_calc_ratio:%.1f%%\n",
+        gpu_timer.ElapsedSec() / outer_timer.ElapsedSec() * 100,
+        timer.ElapsedSec() / outer_timer.ElapsedSec() * 100);
     fprintf(stderr, "THROUGHPUT:%.0f\n", accum_num / outer_timer.ElapsedSec());
   }));
 }
@@ -431,8 +450,6 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
       int cnt = 0;
       int accum_num = 0;
       Scope* scope = nullptr;
-      std::string calc_key = std::string("emb_bp_calc_") + std::to_string(i);
-      std::string wait_key = std::string("emb_bp_wait_") + std::to_string(i);
       platform::Timer timer;
       platform::Timer outer_timer;
       outer_timer.Start();
