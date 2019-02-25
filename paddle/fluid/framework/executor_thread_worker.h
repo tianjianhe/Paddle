@@ -38,14 +38,13 @@ class ExecutorThreadWorker {
   ExecutorThreadWorker(int nranks, int rank_id, int nscopes, int ncpu_calc_threads,
       int nasync_steps, Scope* scope, const ProgramDesc& main_program_desc,
       const std::vector<std::shared_ptr<DataFeed>>& readers,
-      const std::vector<std::string>& fetch_var_names,
-      std::shared_ptr<ncclUniqueId> nccl_id) : nranks_(nranks), rank_id_(rank_id),
-        nscopes_(nscopes), ncpu_calc_threads_(ncpu_calc_threads), nasync_steps_(nasync_steps),
+      const std::vector<std::string>& fetch_var_names) 
+        : nranks_(nranks), rank_id_(rank_id), nscopes_(nscopes),
+        ncpu_calc_threads_(ncpu_calc_threads), nasync_steps_(nasync_steps),
         readers_(readers), root_scope_(scope) {
     main_program_.reset(new ProgramDesc(main_program_desc));
     fetch_var_names_.insert(fetch_var_names_.end(), fetch_var_names.begin(),
                             fetch_var_names.end());
-    nccl_id_ = nccl_id;
     cpu_place_ = platform::default_cpu();
     gpu_place_ = platform::CUDAPlace(rank_id);
     cpu_dev_ctx_.reset(new platform::CPUDeviceContext(cpu_place_));
@@ -81,8 +80,6 @@ class ExecutorThreadWorker {
   int nasync_steps_;
 
   cudaStream_t cuda_stream_;
-  std::shared_ptr<ncclUniqueId> nccl_id_;
-  ncclComm_t nccl_comm_;
 
   std::vector<std::shared_ptr<DataFeed>> readers_;
   // operator name

@@ -48,20 +48,6 @@ namespace framework {
   }                                                 \
 } while(0)
 
-//#define NCCL_SYNC_
-#ifdef NCCL_SYNC_
-
-#define NCCLCHECK(cmd) do {                         \
-  ncclResult_t r = cmd;                             \
-  if (r!= ncclSuccess) {                            \
-    printf("Failed, NCCL error %s:%d '%s'\n",             \
-        __FILE__,__LINE__,platform::dynload::ncclGetErrorString(r));   \
-    exit(EXIT_FAILURE);                             \
-  }                                                 \
-} while(0)
-
-#endif
-
 void ExecutorThreadWorker::CreateThreadScope(const ProgramDesc& program) {
   auto& block = program.Block(0);
 
@@ -309,8 +295,13 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
       platform::Timer timer;
       platform::Timer reader_timer;
       platform::Timer outer_timer;
-      outer_timer.Start();
+      bool started = false;
 	  	while (scope_pool_->Receive(&scope)) {
+        if (!started) {
+          outer_timer.Start();
+          started = true;
+        }
+
         timer.Resume();
         reader_queue_->Receive(&reader);
 
@@ -375,13 +366,20 @@ void ExecutorThreadWorker::StartGPUCalcThread() {
     int step_cnt = 0;
     int accum_num = 0;
     Scope* scope = nullptr;
-    platform::Timer timer;
-    platform::Timer gpu_timer;
     platform::Timer outer_timer;
-    platform::Timer sync_timer;
-    outer_timer.Start();
+    platform::Timer main_timer;
+    platform::Timer gpu_timer;
+    platform::Timer memcpy_timer;
+    platform::Timer timer;
+    bool started = false;
   	while (emb_ff_scope_queue_->Receive(&scope)) {
-      timer.Resume();
+      if (!started) {
+        outer_timer.Start();
+        started = true;
+      }
+
+      main_timer.Resume();
+      memcpy_timer.Resume();
       const LoDTensor& user_concat_cpu = scope->FindVar("user_concat_cpu")->Get<LoDTensor>();
       const LoDTensor& news_concat_cpu = scope->FindVar("news_concat_cpu")->Get<LoDTensor>();
       const float* user_concat_cpu_data = user_concat_cpu.data<float>();
@@ -395,22 +393,15 @@ void ExecutorThreadWorker::StartGPUCalcThread() {
       cudaMemcpy(user_concat_gpu_data, user_concat_cpu_data, user_concat_cpu.memory_size(), cudaMemcpyHostToDevice);
       cudaMemcpy(news_concat_gpu_data, news_concat_cpu_data, news_concat_cpu.memory_size(), cudaMemcpyHostToDevice);
       accum_num += user_concat_cpu.dims()[0];
+      memcpy_timer.Pause();
 
       gpu_timer.Resume();
       for (auto& op : ops_) {
-#ifdef NCCL_SYNC_
-        if (op->Type() == "sgd" && nranks_ > 1) {
-          LoDTensor* grad = scope->FindVar(op->Input("Grad"))->GetMutable<LoDTensor>();
-          platform::dynload::ncclAllReduce(static_cast<void*>(grad->mutable_data<float>(gpu_place_)),
-                static_cast<void*>(grad->mutable_data<float>(gpu_place_)),
-                grad->numel() * sizeof(float), ncclFloat, ncclSum, nccl_comm_, cuda_stream_);
-          CUDACHECK(cudaStreamSynchronize(cuda_stream_));
-        }
-#endif
         op->Run(*scope, gpu_place_);
       }
       gpu_timer.Pause();
 
+      memcpy_timer.Resume();
       const LoDTensor& user_concat_grad_gpu = scope->FindVar("user_concat@GRAD")->Get<LoDTensor>();
       const LoDTensor& news_concat_grad_gpu = scope->FindVar("news_concat@GRAD")->Get<LoDTensor>();
       const float* user_concat_grad_gpu_data = user_concat_grad_gpu.data<float>();
@@ -423,23 +414,27 @@ void ExecutorThreadWorker::StartGPUCalcThread() {
       float* news_concat_grad_cpu_data = news_concat_grad_cpu->mutable_data<float>(cpu_place_);
       cudaMemcpy(user_concat_grad_cpu_data, user_concat_grad_gpu_data, user_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost);
       cudaMemcpy(news_concat_grad_cpu_data, news_concat_grad_gpu_data, news_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost);
+      memcpy_timer.Pause();
 
       scope->DropKids();
+      timer.Resume();
   		emb_bp_scope_queue_->Send(scope);
-
-      if (++step_cnt >= nasync_steps_) {
-        sync_timer.Resume();
-        AsyncUpdateParam();
-        step_cnt = 0;
-        sync_timer.Pause();
-      }
       timer.Pause();
+
+      if (++step_cnt % nasync_steps_ == 0) {
+        AsyncUpdateParam();
+      }
+
+      main_timer.Pause();
   	}
-    emb_bp_scope_queue_->Close();
+
     outer_timer.Pause();
-    fprintf(stderr, "pure_gpu_ratio:%.1f%% gpu_calc_ratio:%.1f%%\n",
-        gpu_timer.ElapsedSec() / outer_timer.ElapsedSec() * 100,
-        timer.ElapsedSec() / outer_timer.ElapsedSec() * 100);
+    emb_bp_scope_queue_->Close();
+    fprintf(stderr, "memcpy_ratio:%.1f%%:%.1f gpu_ratio:%.1f%%:%.1f test_ratio:%.1f%%:%.1f main_net_ratio:%.1f%%:%.1f\n",
+        memcpy_timer.ElapsedSec() / outer_timer.ElapsedSec() * 100, memcpy_timer.ElapsedMS(),
+        gpu_timer.ElapsedSec() / outer_timer.ElapsedSec() * 100, gpu_timer.ElapsedMS(),
+        timer.ElapsedSec() / outer_timer.ElapsedSec() * 100, timer.ElapsedMS(),
+        main_timer.ElapsedSec() / outer_timer.ElapsedSec() * 100, main_timer.ElapsedMS());
     fprintf(stderr, "THROUGHPUT:%.0f\n", accum_num / outer_timer.ElapsedSec());
   }));
 }
@@ -452,8 +447,13 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
       Scope* scope = nullptr;
       platform::Timer timer;
       platform::Timer outer_timer;
-      outer_timer.Start();
+      bool started = false;
 	  	while (emb_bp_scope_queue_->Receive(&scope)) {
+        if (!started) {
+          outer_timer.Start();
+          started = true;
+        }
+
         accum_num += scope->FindVar("user_concat_grad_cpu")->Get<LoDTensor>().dims()[0];
 
         timer.Resume();
@@ -473,14 +473,6 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
 void ExecutorThreadWorker::TrainFiles() {
   // TODO
   platform::SetNumThreads(1);
-
-#ifdef NCCL_SYNC_
-  if (nranks_ > 1) {
-    CUDACHECK(cudaSetDevice(rank_id_));
-    CUDACHECK(cudaStreamCreate(&cuda_stream_));
-    platform::dynload::ncclCommInitRank(&nccl_comm_, nranks_, *nccl_id_, rank_id_);
-  }
-#endif
 
   int fetch_var_num = fetch_var_names_.size();
   fetch_values_.clear();

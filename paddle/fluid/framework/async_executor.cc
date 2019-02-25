@@ -104,16 +104,10 @@ void AsyncExecutor::RunFromFile(const ProgramDesc& main_program,
 
   InitRootScope(main_program);
 
-  std::shared_ptr<ncclUniqueId> nccl_id;
-  //if (ncards > 1) {
-  //  nccl_id.reset(new ncclUniqueId);
-  //  platform::dynload::ncclGetUniqueId(nccl_id.get());
-  //}
-
   std::vector<std::shared_ptr<ExecutorThreadWorker>> workers;
   for (int i = 0; i < actual_ncards; ++i) {
     workers.emplace_back(new ExecutorThreadWorker(actual_ncards, i, nscopes, ncpu_calc_threads,
-          nasync_steps, root_scope_, main_program, readers[i], fetch_var_names, nccl_id));
+          nasync_steps, root_scope_, main_program, readers[i], fetch_var_names));
   }
 
   // prepare thread resource here
