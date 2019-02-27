@@ -74,7 +74,8 @@ void AsyncExecutor::RunFromFile(const ProgramDesc& main_program,
                                 const std::vector<std::string>& filelist,
                                 const std::vector<std::string>& fetch_var_names,
                                 const int ncards, const int nscopes, const int nreaders,
-                                const int ncpu_calc_threads, const int nasync_steps) {
+                                const int nemb_ff_threads, const int nemb_bp_threads,
+                                const int nasync_steps) {
   std::vector<std::thread> threads;
 
   auto& block = main_program.Block(0);
@@ -91,23 +92,25 @@ void AsyncExecutor::RunFromFile(const ProgramDesc& main_program,
   google::protobuf::TextFormat::ParseFromString(data_feed_desc_str, &data_feed_desc);
 
   int actual_ncards = ncards;
+  int actual_nreaders = nreaders;
   int nfiles = filelist.size();
   PADDLE_ENFORCE(nfiles > 0, "File list cannot be empty");
 
   if (actual_ncards > nfiles) {
     VLOG(1) << "ncards = " << ncards << ", nfiles = " << nfiles << ". Changing ncards = " << nfiles;
     actual_ncards = nfiles;
+    actual_nreaders = 1;
   }
 
   std::vector<std::vector<std::shared_ptr<DataFeed>>> readers;
-  PrepareReaders(readers, actual_ncards, nreaders, data_feed_desc, filelist);
+  PrepareReaders(readers, actual_ncards, actual_nreaders, data_feed_desc, filelist);
 
   InitRootScope(main_program);
 
   std::vector<std::shared_ptr<ExecutorThreadWorker>> workers;
   for (int i = 0; i < actual_ncards; ++i) {
-    workers.emplace_back(new ExecutorThreadWorker(actual_ncards, i, nscopes, ncpu_calc_threads,
-          nasync_steps, root_scope_, main_program, readers[i], fetch_var_names));
+    workers.emplace_back(new ExecutorThreadWorker(actual_ncards, i, nscopes, nemb_ff_threads,
+          nemb_bp_threads, nasync_steps, root_scope_, main_program, readers[i], fetch_var_names));
   }
 
   // prepare thread resource here

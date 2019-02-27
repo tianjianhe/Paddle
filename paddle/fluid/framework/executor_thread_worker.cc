@@ -31,7 +31,6 @@ limitations under the License. */
 #include "paddle/fluid/platform/place.h"
 #include "paddle/fluid/platform/timer.h"
 #include "paddle/fluid/pybind/pybind.h"
-#include "paddle/fluid/func_profile.h"
 #include "paddle/fluid/platform/timer.h"
 #include "paddle/fluid/operators/math/blas.h"
 #include "paddle/fluid/framework/eigen.h"
@@ -284,11 +283,13 @@ void ExecutorThreadWorker::StartReaders() {
 }
 
 void ExecutorThreadWorker::StartEmbFFThreads() {
-  for (int i = 0; i < ncpu_calc_threads_; ++i) {
+  emb_ff_stats_.resize(nemb_ff_threads_);
+  reader_num_monitor_ = readers_.size();
+  for (int i = 0; i < nemb_ff_threads_; ++i) {
     all_threads_.push_back(std::thread([this, i]() {
-      int cnt = 0;
+      int step_cnt = 0;
       int batch_size = 0;
-      int accum_num = 0;
+      long accum_num = 0;
       Scope* scope = nullptr;
       DataFeed* reader = nullptr;
 
@@ -296,7 +297,7 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
       platform::Timer reader_timer;
       platform::Timer outer_timer;
       bool started = false;
-	  	while (scope_pool_->Receive(&scope)) {
+      while (scope_pool_->Receive(&scope)) {
         if (!started) {
           outer_timer.Start();
           started = true;
@@ -310,26 +311,33 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
         batch_size = reader->Next();
         reader_timer.Pause();
 
-      	if (batch_size <= 0) {
-          LOG(ERROR) << "emb_ff" << i << ": end of file";
-	  			break;
-      	}
+        if (batch_size <= 0) {
+          std::lock_guard<std::mutex> lock(reader_num_mutex_);
+          if (--reader_num_monitor_ <= 0) {
+            reader_queue_->Close(); 
+            break;
+          }
+          continue;
+        }
         reader_queue_->Send(reader);
         accum_num += batch_size;
 
         LookupTableSumConcat(scope);
+
+        emb_ff_scope_queue_->Send(scope);
+
+        ++step_cnt;
         timer.Pause();
-
-	  		emb_ff_scope_queue_->Send(scope);
-
-        ++cnt;
-	  	}
+      }
       outer_timer.Pause();
       emb_ff_scope_queue_->Close();
 
-      fprintf(stderr, "emb_ff_reader_ratio:%.1f%% emb_ff_ratio:%.1f%%\n",
-          reader_timer.ElapsedSec() / outer_timer.ElapsedSec() * 100,
-          timer.ElapsedSec() / outer_timer.ElapsedSec() * 100);
+      emb_ff_stats_[i].reader_ratio = reader_timer.ElapsedSec() / outer_timer.ElapsedSec();
+      emb_ff_stats_[i].reader_us = reader_timer.ElapsedUS() / step_cnt;
+      emb_ff_stats_[i].reader_throughput = accum_num / reader_timer.ElapsedSec();
+      emb_ff_stats_[i].emb_ff_ratio = timer.ElapsedSec() / outer_timer.ElapsedSec();
+      emb_ff_stats_[i].emb_ff_us = timer.ElapsedUS() / step_cnt;
+      emb_ff_stats_[i].emb_ff_throughput = accum_num / outer_timer.ElapsedSec();
     }));
   }
 }
@@ -370,9 +378,8 @@ void ExecutorThreadWorker::StartGPUCalcThread() {
     platform::Timer main_timer;
     platform::Timer gpu_timer;
     platform::Timer memcpy_timer;
-    platform::Timer timer;
     bool started = false;
-  	while (emb_ff_scope_queue_->Receive(&scope)) {
+    while (emb_ff_scope_queue_->Receive(&scope)) {
       if (!started) {
         outer_timer.Start();
         started = true;
@@ -417,38 +424,41 @@ void ExecutorThreadWorker::StartGPUCalcThread() {
       memcpy_timer.Pause();
 
       scope->DropKids();
-      timer.Resume();
-  		emb_bp_scope_queue_->Send(scope);
-      timer.Pause();
+      emb_bp_scope_queue_->Send(scope);
 
       if (++step_cnt % nasync_steps_ == 0) {
         AsyncUpdateParam();
       }
 
       main_timer.Pause();
-  	}
+    }
 
     outer_timer.Pause();
     emb_bp_scope_queue_->Close();
-    fprintf(stderr, "memcpy_ratio:%.1f%%:%.1f gpu_ratio:%.1f%%:%.1f test_ratio:%.1f%%:%.1f main_net_ratio:%.1f%%:%.1f\n",
-        memcpy_timer.ElapsedSec() / outer_timer.ElapsedSec() * 100, memcpy_timer.ElapsedMS(),
-        gpu_timer.ElapsedSec() / outer_timer.ElapsedSec() * 100, gpu_timer.ElapsedMS(),
-        timer.ElapsedSec() / outer_timer.ElapsedSec() * 100, timer.ElapsedMS(),
-        main_timer.ElapsedSec() / outer_timer.ElapsedSec() * 100, main_timer.ElapsedMS());
-    fprintf(stderr, "THROUGHPUT:%.0f\n", accum_num / outer_timer.ElapsedSec());
+
+    main_net_stat_.memcpy_ratio = memcpy_timer.ElapsedSec() / outer_timer.ElapsedSec();
+    main_net_stat_.memcpy_us = memcpy_timer.ElapsedUS() / step_cnt;
+    main_net_stat_.gpu_ratio = gpu_timer.ElapsedSec() / outer_timer.ElapsedSec();
+    main_net_stat_.gpu_us = gpu_timer.ElapsedUS() / step_cnt;
+    main_net_stat_.main_net_ratio = main_timer.ElapsedSec() / outer_timer.ElapsedSec();
+    main_net_stat_.main_net_us = main_timer.ElapsedUS() / step_cnt;
+    main_net_stat_.other_ratio = main_net_stat_.main_net_ratio - main_net_stat_.memcpy_ratio - main_net_stat_.gpu_ratio;
+    main_net_stat_.other_us = main_net_stat_.main_net_us - main_net_stat_.memcpy_us - main_net_stat_.gpu_us;
+    main_net_stat_.throughput = accum_num / outer_timer.ElapsedSec();
   }));
 }
 
 void ExecutorThreadWorker::StartEmbBPThreads() {
-  for (int i = 0; i < ncpu_calc_threads_; ++i) {
+  emb_bp_stats_.resize(nemb_bp_threads_);
+  for (int i = 0; i < nemb_bp_threads_; ++i) {
     all_threads_.push_back(std::thread([this, i]() {
-      int cnt = 0;
+      int step_cnt = 0;
       int accum_num = 0;
       Scope* scope = nullptr;
       platform::Timer timer;
       platform::Timer outer_timer;
       bool started = false;
-	  	while (emb_bp_scope_queue_->Receive(&scope)) {
+      while (emb_bp_scope_queue_->Receive(&scope)) {
         if (!started) {
           outer_timer.Start();
           started = true;
@@ -459,13 +469,16 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
         timer.Resume();
         LookupTableSumConcatGrad(scope);
         timer.Pause();
-	  		scope_pool_->Send(scope);
+        scope_pool_->Send(scope);
 
-        ++cnt;//LOG(ERROR) << "t" << thread_id_ << " bp" << i  << ":" << ++cnt;
-	  	}
+        ++step_cnt;
+      }
       outer_timer.Pause();
       scope_pool_->Close();
-      fprintf(stderr, "emb_bp_ratio:%.1f%%\n", timer.ElapsedSec() / outer_timer.ElapsedSec() * 100);
+
+      emb_bp_stats_[i].emb_bp_ratio = timer.ElapsedSec() / outer_timer.ElapsedSec();
+      emb_bp_stats_[i].emb_bp_us = timer.ElapsedUS() / step_cnt;
+      emb_bp_stats_[i].throughput = accum_num / outer_timer.ElapsedSec();
     }));
   }
 }
@@ -486,6 +499,39 @@ void ExecutorThreadWorker::TrainFiles() {
   for (auto& t : all_threads_) {
     t.join();    
   }
+
+  EmbFFStat emb_ff_stat;
+  for (int i = 0; i < nemb_ff_threads_; ++i) {
+    emb_ff_stat.reader_ratio += emb_ff_stats_[i].reader_ratio / nemb_ff_threads_;
+    emb_ff_stat.reader_us += emb_ff_stats_[i].reader_us / nemb_ff_threads_;
+    // no avg
+    emb_ff_stat.reader_throughput += emb_ff_stats_[i].reader_throughput;
+
+    emb_ff_stat.emb_ff_ratio += emb_ff_stats_[i].emb_ff_ratio / nemb_ff_threads_;
+    emb_ff_stat.emb_ff_us += emb_ff_stats_[i].emb_ff_us / nemb_ff_threads_;
+    // no avg
+    emb_ff_stat.emb_ff_throughput += emb_ff_stats_[i].emb_ff_throughput;
+  }
+  fprintf(stderr, "emb_ff_perf reader:%.1f%%:%d emb_ff:%.1f%%:%d reader_trp:%d\n",
+      emb_ff_stat.reader_ratio * 100, static_cast<int>(emb_ff_stat.reader_us),
+      emb_ff_stat.emb_ff_ratio * 100, static_cast<int>(emb_ff_stat.emb_ff_us),
+      static_cast<int>(emb_ff_stat.reader_throughput));
+
+  EmbBPStat emb_bp_stat;
+  for (int i = 0; i < nemb_bp_threads_; ++i) {
+    emb_bp_stat.emb_bp_ratio += emb_bp_stats_[i].emb_bp_ratio / nemb_bp_threads_;
+    emb_bp_stat.emb_bp_us += emb_bp_stats_[i].emb_bp_us / nemb_bp_threads_;
+  }
+  fprintf(stderr, "emb_bp_perf emb_bp:%.1f%%:%d trp:%d\n",
+      emb_bp_stat.emb_bp_ratio * 100, static_cast<int>(emb_bp_stat.emb_bp_us),
+      static_cast<int>(emb_bp_stat.throughput));
+
+  fprintf(stderr, "main_net_perf memcpy:%.1f%%:%d gpu:%.1f%%:%d other:%.1f%%:%d main_net:%.1f%%:%d\n",
+      main_net_stat_.memcpy_ratio * 100, static_cast<int>(main_net_stat_.memcpy_us),
+      main_net_stat_.gpu_ratio * 100, static_cast<int>(main_net_stat_.gpu_us),
+      main_net_stat_.other_ratio * 100, static_cast<int>(main_net_stat_.other_us),
+      main_net_stat_.main_net_ratio * 100, static_cast<int>(main_net_stat_.main_net_us));
+  fprintf(stderr, "THROUGHPUT:%d\n", static_cast<int>(main_net_stat_.throughput));
 
   LOG(ERROR) << "Finish training";
 }

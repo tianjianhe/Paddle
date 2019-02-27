@@ -97,7 +97,8 @@ class AsyncExecutor(object):
             ncards,
             nscopes,
             nreaders,
-            ncpu_calc_threads,
+            nemb_ff_threads,
+            nemb_bp_threads,
             nasync_steps):
         """
         Run program by this AsyncExecutor. Training dataset will be in filelist.
@@ -159,9 +160,8 @@ class AsyncExecutor(object):
                         "with the last dimension size 1 supported." %
                         (fetch_var.name))
 
-        self.executor.run_from_files(program_desc,
-                                     data_feed.desc(), filelist, fetch_var_names, ncards,
-                                     nscopes, nreaders, ncpu_calc_threads, nasync_steps)
+        self.executor.run_from_files(program_desc, data_feed.desc(), filelist, fetch_var_names, ncards,
+                                     nscopes, nreaders, nemb_ff_threads, nemb_bp_threads, nasync_steps)
 
     def download_data(self,
                       afs_path,

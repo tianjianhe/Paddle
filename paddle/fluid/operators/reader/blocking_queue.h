@@ -83,6 +83,19 @@ class BlockingQueue {
     }
   }
 
+  bool Front(T* elem) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    receive_cv_.wait(lock, [&] { return !queue_.empty() || closed_; });
+    if (!queue_.empty()) {
+      PADDLE_ENFORCE_NOT_NULL(elem);
+      *elem = queue_.front();
+      return true;
+    } else {
+      PADDLE_ENFORCE(closed_);
+      return false;
+    }
+  }
+
   void ReOpen() {
     std::lock_guard<std::mutex> lock(mutex_);
     closed_ = false;

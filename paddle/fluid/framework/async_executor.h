@@ -46,7 +46,8 @@ class AsyncExecutor {
                    const int ncards,
                    const int nscopes,
                    const int nreaders,
-                   const int ncpu_calc_threads,
+                   const int nemb_ff_threads,
+                   const int nemb_bp_threads,
                    const int nasync_steps);
   
  private:
