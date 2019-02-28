@@ -304,7 +304,10 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
         }
 
         timer.Resume();
-        reader_queue_->Receive(&reader);
+        if (!reader_queue_->Receive(&reader)) {
+          LOG(ERROR) << "rank_" << rank_id_ << " emb_ff_" << i << " fail to receive reader";
+          break;
+        }
 
         reader_timer.Resume();
         reader->AssignFeedVar(*scope);
@@ -312,8 +315,10 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
         reader_timer.Pause();
 
         if (batch_size <= 0) {
+          LOG(ERROR) << "rank_" << rank_id_ << " emb_ff_" << i << " batch_size <= 0";
           std::lock_guard<std::mutex> lock(reader_num_mutex_);
           if (--reader_num_monitor_ <= 0) {
+            LOG(ERROR) << "rank_" << rank_id_ << " emb_ff_" << i << " reader_num <= 0";
             reader_queue_->Close(); 
             break;
           }
@@ -329,6 +334,7 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
         ++step_cnt;
         timer.Pause();
       }
+      LOG(ERROR) << "rank_" << rank_id_ << " emb_ff_" << i << " exit";
       outer_timer.Pause();
       emb_ff_scope_queue_->Close();
 
@@ -453,7 +459,7 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
   for (int i = 0; i < nemb_bp_threads_; ++i) {
     all_threads_.push_back(std::thread([this, i]() {
       int step_cnt = 0;
-      int accum_num = 0;
+      long accum_num = 0;
       Scope* scope = nullptr;
       platform::Timer timer;
       platform::Timer outer_timer;
@@ -521,6 +527,7 @@ void ExecutorThreadWorker::TrainFiles() {
   for (int i = 0; i < nemb_bp_threads_; ++i) {
     emb_bp_stat.emb_bp_ratio += emb_bp_stats_[i].emb_bp_ratio / nemb_bp_threads_;
     emb_bp_stat.emb_bp_us += emb_bp_stats_[i].emb_bp_us / nemb_bp_threads_;
+    emb_bp_stat.throughput += emb_bp_stats_[i].throughput;
   }
   fprintf(stderr, "emb_bp_perf emb_bp:%.1f%%:%d trp:%d\n",
       emb_bp_stat.emb_bp_ratio * 100, static_cast<int>(emb_bp_stat.emb_bp_us),
