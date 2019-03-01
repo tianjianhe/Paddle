@@ -31,153 +31,6 @@ limitations under the License. */
 namespace paddle {
 namespace framework {
 
-//template <typename T>
-//class ReadWriteQueue {
-// public:
-//  explicit ReadWriteQueue(size_t capacity) 
-//      : capacity_(capacity), read_index_(0), write_index_(0), closed_(false) {
-//    PADDLE_ENFORCE_GT(capacity_, 0,
-//        "The capacity of a ReadWriteQueue must be greater than 0.");
-//    PADDLE_ENFORCE((capacity_ & (capacity_ - 1)) == 0, 
-//        "The capacity of a ReadWriteQueue must be 2^N.");
-//    ring_buffer_ = new T[capacity_];
-//  }
-//
-//  ~ReadWriteQueue() {
-//    delete[] ring_buffer_;
-//  }
-//
-//  bool Send(T&& elem) {
-//    size_t next_index = (write_index_ + 1) & (capacity_ - 1);
-//    if (next_index == read_index_) {
-//      std::unique_lock<std::mutex> lock(mutex_);
-//      LOG(ERROR) << "full";
-//      mutex_cv_.wait(lock, [&] { return next_index != read_index_ || closed_; });
-//    }
-//
-//    if (closed_) return false;
-//
-//    ring_buffer_[write_index_] = std::move(elem);
-//    write_index_ = next_index;
-//    mutex_cv_.notify_all();
-//    return true;
-//  }
-//
-//  bool Receive(T* elem) {
-//    if (read_index_ == write_index_) {
-//      std::unique_lock<std::mutex> lock(mutex_);
-//      mutex_cv_.wait(lock, [&] { return read_index_ != write_index_ || closed_; });
-//    }
-//
-//    if (closed_) return false;
-//
-//    *elem = std::move(ring_buffer_[read_index_]);
-//    read_index_ = (read_index_ + 1) & (capacity_ - 1);
-//    mutex_cv_.notify_all();
-//    return true;
-//  }
-//
-//  void Close() {
-//    closed_ = true;
-//    mutex_cv_.notify_all();
-//  }
-//
-//  bool IsClosed() const {
-//    return closed_;
-//  }
-//
-//  size_t Cap() const {
-//    return capacity_;
-//  }
-//
-// private:
-//  size_t capacity_;
-//	size_t read_index_;
-//  size_t write_index_;	
-//  bool closed_;
-//	T* ring_buffer_;
-//
-//  std::mutex mutex_;
-//  std::condition_variable mutex_cv_;
-//};
-
-//template <typename T>
-//class ReadWriteQueue {
-// public:
-//  explicit ReadWriteQueue(size_t capacity) 
-//      : capacity_(capacity), read_index_(capacity_), write_index_(0), closed_(false) {
-//    PADDLE_ENFORCE_GT(capacity_, 0,
-//        "The capacity of a ReadWriteQueue must be greater than 0.");
-//    buffer_[0] = new T[capacity_];
-//    buffer_[1] = new T[capacity_];
-//    read_buffer_ = buffer_[0];
-//    write_buffer_ = buffer_[1];
-//  }
-//
-//  ~ReadWriteQueue() {
-//    delete[] buffer_[0];
-//    delete[] buffer_[1];
-//    buffer_[0] = nullptr;
-//    buffer_[1] = nullptr;
-//  }
-//
-//  bool Send(T&& elem) {
-//    if (write_index_ == capacity_) {
-//      if (read_index_ != capacity_) {
-//        std::unique_lock<std::mutex> lock(mutex_);
-//        mutex_cv_.wait(lock, [&] { return read_index_ == capacity_ || closed_; });
-//      }
-//
-//      std::swap(write_buffer_, read_buffer_);
-//      write_index_ = 0;
-//      read_index_ = 0;
-//      mutex_cv_.notify_one();
-//    }
-//
-//    write_buffer_[write_index_] = std::move(elem);
-//    ++write_index_;
-//    return true;
-//  }
-//
-//  bool Receive(T* elem) {
-//    if (read_index_ == capacity_) {
-//      mutex_cv_.notify_one();
-//      std::unique_lock<std::mutex> lock(mutex_);
-//      mutex_cv_.wait(lock, [&] { return read_index_ != capacity_ || closed_; });
-//    }
-//    if (closed_) return false;
-//
-//    *elem = std::move(read_buffer_[read_index_]);
-//    ++read_index_;
-//    return true;
-//  }
-//
-//  void Close() {
-//    closed_ = true;
-//    mutex_cv_.notify_all();
-//  }
-//
-//  bool IsClosed() const {
-//    return closed_;
-//  }
-//
-//  size_t Cap() const {
-//    return capacity_;
-//  }
-//
-// private:
-//  size_t capacity_;
-//	size_t read_index_;
-//  size_t write_index_;	
-//  bool closed_;
-//	T* buffer_[2];
-//  T* read_buffer_;
-//  T* write_buffer_;
-//
-//  std::mutex mutex_;
-//  std::condition_variable mutex_cv_;
-//};
-
 // DataFeed is the base virtual class for all ohther DataFeeds.
 // It is used to read files and parse the data for subsequent trainer.
 // Example:
@@ -292,6 +145,9 @@ class PrivateQueueDataFeed : public DataFeed {
   // This function is used to put ins_vec to feed_vec
   virtual void PutToFeedVec(const T& ins_vec) = 0;
 
+  virtual bool Preprocess(const std::string& filename);
+  virtual bool Postprocess();
+
   // The thread for read files
   std::thread read_thread_;
   // using ifstream one line and one line parse is faster
@@ -340,6 +196,16 @@ class MultiSlotType {
     offset_[0] = 0;
   }
   const std::vector<size_t>& GetOffset() const { return offset_; }
+  void CopyValues(const float* input, size_t size) {
+    CheckFloat();
+    float_feasign_.resize(size);
+    memcpy(float_feasign_.data(), input, size * sizeof(float));
+  }
+  void CopyValues(const uint64_t* input, size_t size) {
+    CheckUint64();
+    uint64_feasign_.resize(size);
+    memcpy(uint64_feasign_.data(), input, size * sizeof(uint64_t));
+  }
   void AddValue(const float v) {
     CheckFloat();
     float_feasign_.push_back(v);
@@ -400,5 +266,27 @@ class MultiSlotDataFeed
   virtual bool ParseOneInstance(std::vector<MultiSlotType>* instance);
   virtual void PutToFeedVec(const std::vector<MultiSlotType>& ins_vec);
 };
+
+class MultiSlotBinaryDataFeed
+    : public PrivateQueueDataFeed<std::vector<MultiSlotType>> {
+ public:
+  MultiSlotBinaryDataFeed() {}
+  virtual ~MultiSlotBinaryDataFeed() {}
+  virtual void Init(const paddle::framework::DataFeedDesc& data_feed_desc);
+  virtual bool CheckFile(const char* filename);
+
+ protected:
+  std::vector<char> buffer_;
+  size_t offset_;
+
+  virtual void AddInstanceToInsVec(std::vector<MultiSlotType>* vec_ins,
+                                   const std::vector<MultiSlotType>& instance,
+                                   int index);
+  virtual bool ParseOneInstance(std::vector<MultiSlotType>* instance);
+  virtual void PutToFeedVec(const std::vector<MultiSlotType>& ins_vec);
+
+  virtual bool Preprocess(const std::string& filename);
+};
+
 }  // namespace framework
 }  // namespace paddle

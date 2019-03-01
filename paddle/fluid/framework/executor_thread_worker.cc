@@ -296,8 +296,11 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
       platform::Timer timer;
       platform::Timer reader_timer;
       platform::Timer outer_timer;
+      platform::Timer assign_scope_timer;
       bool started = false;
-      while (scope_pool_->Receive(&scope)) {
+
+      scope_pool_->Receive(&scope);
+      while (true /*scope_pool_->Receive(&scope)*/) {
         if (!started) {
           outer_timer.Start();
           started = true;
@@ -305,20 +308,19 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
 
         timer.Resume();
         if (!reader_queue_->Receive(&reader)) {
-          LOG(ERROR) << "rank_" << rank_id_ << " emb_ff_" << i << " fail to receive reader";
           break;
         }
 
         reader_timer.Resume();
+        assign_scope_timer.Resume();
         reader->AssignFeedVar(*scope);
+        assign_scope_timer.Pause();
         batch_size = reader->Next();
         reader_timer.Pause();
 
         if (batch_size <= 0) {
-          LOG(ERROR) << "rank_" << rank_id_ << " emb_ff_" << i << " batch_size <= 0";
           std::lock_guard<std::mutex> lock(reader_num_mutex_);
           if (--reader_num_monitor_ <= 0) {
-            LOG(ERROR) << "rank_" << rank_id_ << " emb_ff_" << i << " reader_num <= 0";
             reader_queue_->Close(); 
             break;
           }
@@ -327,14 +329,14 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
         reader_queue_->Send(reader);
         accum_num += batch_size;
 
-        LookupTableSumConcat(scope);
+        //LookupTableSumConcat(scope);
 
-        emb_ff_scope_queue_->Send(scope);
+        //emb_ff_scope_queue_->Send(scope);
+        //scope_pool_->Send(scope);
 
         ++step_cnt;
         timer.Pause();
       }
-      LOG(ERROR) << "rank_" << rank_id_ << " emb_ff_" << i << " exit";
       outer_timer.Pause();
       emb_ff_scope_queue_->Close();
 
@@ -344,6 +346,8 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
       emb_ff_stats_[i].emb_ff_ratio = timer.ElapsedSec() / outer_timer.ElapsedSec();
       emb_ff_stats_[i].emb_ff_us = timer.ElapsedUS() / step_cnt;
       emb_ff_stats_[i].emb_ff_throughput = accum_num / outer_timer.ElapsedSec();
+      emb_ff_stats_[i].other_ratio = assign_scope_timer.ElapsedSec() / outer_timer.ElapsedSec();
+      emb_ff_stats_[i].other_us = assign_scope_timer.ElapsedUS() / step_cnt;
     }));
   }
 }
@@ -517,11 +521,15 @@ void ExecutorThreadWorker::TrainFiles() {
     emb_ff_stat.emb_ff_us += emb_ff_stats_[i].emb_ff_us / nemb_ff_threads_;
     // no avg
     emb_ff_stat.emb_ff_throughput += emb_ff_stats_[i].emb_ff_throughput;
+
+    emb_ff_stat.other_ratio += emb_ff_stats_[i].other_ratio / nemb_ff_threads_;
+    emb_ff_stat.other_us += emb_ff_stats_[i].other_us / nemb_ff_threads_;
   }
-  fprintf(stderr, "emb_ff_perf reader:%.1f%%:%d emb_ff:%.1f%%:%d reader_trp:%d\n",
+  fprintf(stderr, "emb_ff_perf reader:%.1f%%:%d emb_ff:%.1f%%:%d reader_trp:%d other:%.1f%%:%d\n",
       emb_ff_stat.reader_ratio * 100, static_cast<int>(emb_ff_stat.reader_us),
       emb_ff_stat.emb_ff_ratio * 100, static_cast<int>(emb_ff_stat.emb_ff_us),
-      static_cast<int>(emb_ff_stat.reader_throughput));
+      static_cast<int>(emb_ff_stat.reader_throughput),
+      emb_ff_stat.other_ratio * 100, static_cast<int>(emb_ff_stat.other_us));
 
   EmbBPStat emb_bp_stat;
   for (int i = 0; i < nemb_bp_threads_; ++i) {

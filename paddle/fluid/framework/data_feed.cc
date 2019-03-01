@@ -107,29 +107,44 @@ bool PrivateQueueDataFeed<T>::Start() {
 }
 
 template <typename T>
+bool PrivateQueueDataFeed<T>::Preprocess(const std::string& filename) {
+  file_.open(filename.c_str());
+  PADDLE_ENFORCE(file_.good(), "Open file<%s> fail.", filename.c_str());
+  return true;
+}
+
+template <typename T>
+bool PrivateQueueDataFeed<T>::Postprocess() {
+  file_.close();
+  return true;
+}
+
+template <typename T>
 void PrivateQueueDataFeed<T>::ReadThread() {
   std::string filename;
   while (PickOneFile(&filename)) {
-    file_.open(filename.c_str());  // is_text_feed
-    PADDLE_ENFORCE(file_.good(), "Open file<%s> fail.", filename.c_str());
+    if (!Preprocess(filename)) {
+      continue;
+    }
+
     T instance;
     while (ParseOneInstance(&instance)) {
       timer4_.Pause();
-      timer5_.Resume();
+      timer3_.Resume();
       queue_->Send(std::move(instance));
-      timer5_.Pause();
+      timer3_.Pause();
       timer4_.Resume();
     }
     timer4_.Pause();
-    file_.close();
+    Postprocess();
   }
   queue_->Close();
-  //LOG(ERROR) << "ReceiveBatchInstance: " << timer0_.ElapsedUS() / timer0_.Count() * default_batch_size_;
-  //LOG(ERROR) << "EmsembleBatchData: " << timer1_.ElapsedUS() / timer1_.Count() * default_batch_size_;
-  //LOG(ERROR) << "PutToFeedVec: " << timer2_.ElapsedUS() / timer2_.Count();
-  //LOG(ERROR) << "ParseBatchInstance: " << timer4_.ElapsedUS() / timer4_.Count() * default_batch_size_;
-  //LOG(ERROR) << "data parse in ParseBatchInstance: " << timer3_.ElapsedUS() / timer3_.Count() * default_batch_size_;
-  //LOG(ERROR) << "SendBatchInstance: " << timer5_.ElapsedUS() / timer5_.Count() * default_batch_size_;
+  LOG(ERROR) << "ReceiveOneInstance: " << timer0_.ElapsedUS() / timer0_.Count();
+  LOG(ERROR) << "AddOneInstance: " << timer1_.ElapsedUS() / timer1_.Count();
+  LOG(ERROR) << "PutToFeedVec: " << timer2_.ElapsedUS() / timer2_.Count();
+  LOG(ERROR) << "Wait: " << timer3_.ElapsedUS() / timer3_.Count();
+  LOG(ERROR) << "ParseOneInstance: " << timer4_.ElapsedUS() / timer4_.Count();
+  LOG(ERROR) << "LoadOneFile: " << timer5_.ElapsedUS() / timer5_.Count();
 }
 
 template <typename T>
@@ -308,7 +323,6 @@ bool MultiSlotDataFeed::CheckFile(const char* filename) {
 bool MultiSlotDataFeed::ParseOneInstance(std::vector<MultiSlotType>* instance) {
   std::string line;
   if (getline(file_, line)) {
-    timer3_.Resume();
     int use_slots_num = use_slots_.size();
     instance->resize(use_slots_num);
     // parse line
@@ -346,7 +360,6 @@ bool MultiSlotDataFeed::ParseOneInstance(std::vector<MultiSlotType>* instance) {
         }
       }
     }
-    timer3_.Pause();
   } else {
     return false;
   }
@@ -370,6 +383,147 @@ void MultiSlotDataFeed::AddInstanceToInsVec(
 }
 
 void MultiSlotDataFeed::PutToFeedVec(
+    const std::vector<MultiSlotType>& ins_vec) {
+  for (size_t i = 0; i < use_slots_.size(); ++i) {
+    const auto& type = ins_vec[i].GetType();
+    const auto& offset = ins_vec[i].GetOffset();
+    int total_instance = static_cast<int>(offset.back());
+
+    if (type[0] == 'f') {  // float
+      const auto& feasign = ins_vec[i].GetFloatData();
+      float* tensor_ptr = feed_vec_[i]->mutable_data<float>(
+          {total_instance, 1}, platform::CPUPlace());
+      memcpy(tensor_ptr, &feasign[0], total_instance * sizeof(float));
+    } else if (type[0] == 'u') {  // uint64
+      // no uint64_t type in paddlepaddle
+      const auto& feasign = ins_vec[i].GetUint64Data();
+      int64_t* tensor_ptr = feed_vec_[i]->mutable_data<int64_t>(
+          {total_instance, 1}, platform::CPUPlace());
+      memcpy(tensor_ptr, &feasign[0], total_instance * sizeof(int64_t));
+    }
+
+    LoD data_lod{offset};
+    feed_vec_[i]->set_lod(data_lod);
+    if (use_slots_is_dense_[i]) {
+      int dim = total_instance / batch_size_;
+      feed_vec_[i]->Resize({batch_size_, dim});
+    }
+  }
+}
+
+void MultiSlotBinaryDataFeed::Init(
+    const paddle::framework::DataFeedDesc& data_feed_desc) {
+  finish_init_ = false;
+  finish_set_filelist_ = false;
+  finish_start_ = false;
+
+  PADDLE_ENFORCE(data_feed_desc.has_multi_slot_desc(),
+                 "Multi_slot_desc has not been set.");
+  paddle::framework::MultiSlotDesc multi_slot_desc =
+      data_feed_desc.multi_slot_desc();
+  SetBatchSize(data_feed_desc.batch_size());
+  //SetQueueSize(data_feed_desc.batch_size());
+  SetQueueSize(data_feed_desc.batch_size() * 4);
+  size_t all_slot_num = multi_slot_desc.slots_size();
+  all_slots_.resize(all_slot_num);
+  all_slots_type_.resize(all_slot_num);
+  use_slots_index_.resize(all_slot_num);
+  use_slots_.clear();
+  use_slots_is_dense_.clear();
+  for (size_t i = 0; i < all_slot_num; ++i) {
+    const auto& slot = multi_slot_desc.slots(i);
+    all_slots_[i] = slot.name();
+    all_slots_type_[i] = slot.type();
+    use_slots_index_[i] = slot.is_used() ? use_slots_.size() : -1;
+    if (slot.is_used()) {
+      use_slots_.push_back(all_slots_[i]);
+      use_slots_is_dense_.push_back(slot.is_dense());
+    }
+  }
+  feed_vec_.resize(use_slots_.size());
+  finish_init_ = true;
+}
+
+bool MultiSlotBinaryDataFeed::CheckFile(const char* filename) {
+  CheckInit();  // get info of slots
+  std::ifstream fin(filename);
+  if (!fin.good()) {
+    VLOG(1) << "error: open file<" << filename << "> fail";
+    return false;
+  }
+  return true;
+}
+
+bool MultiSlotBinaryDataFeed::Preprocess(const std::string& filename) {
+  timer5_.Resume();
+  file_.open(filename.c_str(), std::ios::binary | std::ios::ate);
+  PADDLE_ENFORCE(file_.good(), "Open file<%s> fail.", filename.c_str());
+  size_t size = file_.tellg();
+  buffer_.resize(size);
+  file_.seekg(0, std::ios::beg);
+  if (file_.read(buffer_.data(), size)) {
+    offset_ = 0;
+    timer5_.Pause();
+    return true;
+  }
+
+  file_.close();
+  return false;
+}
+
+bool MultiSlotBinaryDataFeed::ParseOneInstance(std::vector<MultiSlotType>* instance) {
+  if (offset_ < buffer_.size()) {
+    char* data = buffer_.data();
+    int use_slots_num = use_slots_.size();
+    instance->resize(use_slots_num);
+    for (size_t i = 0; i < use_slots_index_.size(); ++i) {
+      int idx = use_slots_index_[i];
+
+      short num = *reinterpret_cast<short*>(data + offset_);
+      PADDLE_ENFORCE(num,
+          "The number of ids can not be zero, you need padding "
+          "it in data generator; or if there is something wrong with "
+          "the data, please check if the data contains unresolvable "
+          "characters.");
+      offset_ += sizeof(short);
+
+      if (idx != -1) {
+        (*instance)[idx].Init(all_slots_type_[i]);
+        if ((*instance)[idx].GetType()[0] == 'f') {  // float
+          (*instance)[idx].CopyValues(reinterpret_cast<float*>(data + offset_), num);
+          offset_ += num * sizeof(float);
+        } else if ((*instance)[idx].GetType()[0] == 'u') {  // uint64
+          (*instance)[idx].CopyValues(reinterpret_cast<uint64_t*>(data + offset_), num);
+          offset_ += num * sizeof(uint64_t);
+        }
+      } else {
+        offset_ += num * sizeof(uint64_t);
+      }
+    }
+    return true;
+  }
+
+  PADDLE_ENFORCE(offset_ == buffer_.size(), "offset_ > buffer_.size()");
+  return false;
+}
+
+void MultiSlotBinaryDataFeed::AddInstanceToInsVec(
+    std::vector<MultiSlotType>* ins_vec,
+    const std::vector<MultiSlotType>& instance, int index) {
+  if (index == 0) {
+    ins_vec->resize(instance.size());
+    for (size_t i = 0; i < instance.size(); ++i) {
+      (*ins_vec)[i].Init(instance[i].GetType());
+      (*ins_vec)[i].InitOffset();
+    }
+  }
+
+  for (size_t i = 0; i < instance.size(); ++i) {
+    (*ins_vec)[i].AddIns(instance[i]);
+  }
+}
+
+void MultiSlotBinaryDataFeed::PutToFeedVec(
     const std::vector<MultiSlotType>& ins_vec) {
   for (size_t i = 0; i < use_slots_.size(); ++i) {
     const auto& type = ins_vec[i].GetType();

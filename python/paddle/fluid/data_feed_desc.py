@@ -70,7 +70,7 @@ class DataFeedDesc(object):
         self.proto_desc = data_feed_pb2.DataFeedDesc()
         with open(proto_file, 'r') as f:
             text_format.Parse(f.read(), self.proto_desc)
-        if self.proto_desc.name == "MultiSlotDataFeed":
+        if self.proto_desc.name == "MultiSlotDataFeed" or self.proto_desc.name == "MultiSlotBinaryDataFeed":
             self.__name_to_index = {
                 slot.name: i
                 for i, slot in enumerate(self.proto_desc.multi_slot_desc.slots)
@@ -106,7 +106,7 @@ class DataFeedDesc(object):
         Note:
             Default is sparse for all slots
         """
-        if self.proto_desc.name != "MultiSlotDataFeed":
+        if self.proto_desc.name != "MultiSlotDataFeed" and self.proto_desc.name != "MultiSlotBinaryDataFeed":
             raise ValueError(
                 "Only MultiSlotDataFeed need set_dense_slots, pls check your datafeed.proto"
             )
@@ -130,7 +130,7 @@ class DataFeedDesc(object):
         Note:
             Default is not used for all slots
         """
-        if self.proto_desc.name != "MultiSlotDataFeed":
+        if self.proto_desc.name != "MultiSlotDataFeed" and self.proto_desc.name != "MultiSlotBinaryDataFeed":
             raise ValueError(
                 "Only MultiSlotDataFeed need set_use_slots, pls check your datafeed.proto"
             )

@@ -123,6 +123,8 @@ class ExecutorThreadWorker {
     double emb_ff_ratio = 0;
     double emb_ff_us = 0;
     double emb_ff_throughput = 0;
+    double other_ratio = 0;
+    double other_us = 0;
   };
   struct MainNetStat {
     double memcpy_ratio = 0;
