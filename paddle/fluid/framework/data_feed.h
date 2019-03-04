@@ -167,6 +167,7 @@ class PrivateQueueDataFeed : public DataFeed {
   platform::Timer timer3_;
   platform::Timer timer4_;
   platform::Timer timer5_;
+  platform::Timer timer6_;
 };
 
 // This class define the data type of instance(ins_vec) in MultiSlotDataFeed
@@ -276,8 +277,11 @@ class MultiSlotBinaryDataFeed
   virtual bool CheckFile(const char* filename);
 
  protected:
-  std::vector<char> buffer_;
-  size_t offset_;
+  int fd_;
+  char* buffer_{nullptr};
+  size_t buffer_size_{0};
+  size_t end_{0};
+  size_t offset_{0};
 
   virtual void AddInstanceToInsVec(std::vector<MultiSlotType>* vec_ins,
                                    const std::vector<MultiSlotType>& instance,
@@ -286,6 +290,7 @@ class MultiSlotBinaryDataFeed
   virtual void PutToFeedVec(const std::vector<MultiSlotType>& ins_vec);
 
   virtual bool Preprocess(const std::string& filename);
+  virtual bool Postprocess();
 };
 
 }  // namespace framework

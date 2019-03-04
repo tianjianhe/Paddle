@@ -21,6 +21,12 @@ limitations under the License. */
 #include "paddle/fluid/framework/feed_fetch_method.h"
 #include "paddle/fluid/framework/feed_fetch_type.h"
 
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <stdio.h>
+#include <fcntl.h>
+
 namespace paddle {
 namespace framework {
 
@@ -91,7 +97,6 @@ template <typename T>
 void PrivateQueueDataFeed<T>::SetQueueSize(int queue_size) {
   PADDLE_ENFORCE(queue_size > 0, "Illegal queue size: %d.", queue_size);
   queue_size_ = queue_size;
-  //queue_ = std::unique_ptr<ReadWriteQueue<T>>(new ReadWriteQueue<T>(queue_size_));
   queue_ = std::unique_ptr<paddle::operators::reader::BlockingQueue<T>>(
       new paddle::operators::reader::BlockingQueue<T>(queue_size_));
 }
@@ -139,12 +144,13 @@ void PrivateQueueDataFeed<T>::ReadThread() {
     Postprocess();
   }
   queue_->Close();
-  LOG(ERROR) << "ReceiveOneInstance: " << timer0_.ElapsedUS() / timer0_.Count();
-  LOG(ERROR) << "AddOneInstance: " << timer1_.ElapsedUS() / timer1_.Count();
-  LOG(ERROR) << "PutToFeedVec: " << timer2_.ElapsedUS() / timer2_.Count();
-  LOG(ERROR) << "Wait: " << timer3_.ElapsedUS() / timer3_.Count();
-  LOG(ERROR) << "ParseOneInstance: " << timer4_.ElapsedUS() / timer4_.Count();
-  LOG(ERROR) << "LoadOneFile: " << timer5_.ElapsedUS() / timer5_.Count();
+  //LOG(ERROR) << "ReceiveOneInstance: " << timer0_.ElapsedUS() / timer0_.Count();
+  //LOG(ERROR) << "AddOneInstance: " << timer1_.ElapsedUS() / timer1_.Count();
+  //LOG(ERROR) << "PutToFeedVec: " << timer2_.ElapsedUS() / timer2_.Count();
+  //LOG(ERROR) << "Wait: " << timer3_.ElapsedUS() / timer3_.Count();
+  //LOG(ERROR) << "ParseOneInstance: " << timer4_.ElapsedUS() / timer4_.Count();
+  //LOG(ERROR) << "LoadOneFile: " << timer5_.ElapsedUS() / timer5_.Count();
+  //LOG(ERROR) << "CreateMemory: " << timer6_.ElapsedUS() / timer6_.Count();
 }
 
 template <typename T>
@@ -455,31 +461,33 @@ bool MultiSlotBinaryDataFeed::CheckFile(const char* filename) {
 }
 
 bool MultiSlotBinaryDataFeed::Preprocess(const std::string& filename) {
-  timer5_.Resume();
-  file_.open(filename.c_str(), std::ios::binary | std::ios::ate);
-  PADDLE_ENFORCE(file_.good(), "Open file<%s> fail.", filename.c_str());
-  size_t size = file_.tellg();
-  buffer_.resize(size);
-  file_.seekg(0, std::ios::beg);
-  if (file_.read(buffer_.data(), size)) {
-    offset_ = 0;
-    timer5_.Pause();
-    return true;
-  }
+  fd_ = open(filename.c_str(), O_RDONLY);
+  PADDLE_ENFORCE(fd_ != -1, "Fail to open file: %s", filename.c_str());
 
-  file_.close();
-  return false;
+  struct stat sb;
+  fstat(fd_, &sb);
+  end_ = static_cast<size_t>(sb.st_size);
+
+  buffer_ = reinterpret_cast<char*>(mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd_, 0));
+  if (buffer_ == MAP_FAILED) return false;
+
+  offset_ = 0;
+  return true;
+}
+
+bool MultiSlotBinaryDataFeed::Postprocess() {
+  close(fd_);
+  return true;
 }
 
 bool MultiSlotBinaryDataFeed::ParseOneInstance(std::vector<MultiSlotType>* instance) {
-  if (offset_ < buffer_.size()) {
-    char* data = buffer_.data();
+  if (offset_ < end_) {
     int use_slots_num = use_slots_.size();
     instance->resize(use_slots_num);
     for (size_t i = 0; i < use_slots_index_.size(); ++i) {
       int idx = use_slots_index_[i];
 
-      short num = *reinterpret_cast<short*>(data + offset_);
+      short num = *reinterpret_cast<short*>(buffer_ + offset_);
       PADDLE_ENFORCE(num,
           "The number of ids can not be zero, you need padding "
           "it in data generator; or if there is something wrong with "
@@ -490,20 +498,21 @@ bool MultiSlotBinaryDataFeed::ParseOneInstance(std::vector<MultiSlotType>* insta
       if (idx != -1) {
         (*instance)[idx].Init(all_slots_type_[i]);
         if ((*instance)[idx].GetType()[0] == 'f') {  // float
-          (*instance)[idx].CopyValues(reinterpret_cast<float*>(data + offset_), num);
+          (*instance)[idx].CopyValues(reinterpret_cast<float*>(buffer_ + offset_), num);
           offset_ += num * sizeof(float);
         } else if ((*instance)[idx].GetType()[0] == 'u') {  // uint64
-          (*instance)[idx].CopyValues(reinterpret_cast<uint64_t*>(data + offset_), num);
+          (*instance)[idx].CopyValues(reinterpret_cast<uint64_t*>(buffer_ + offset_), num);
           offset_ += num * sizeof(uint64_t);
         }
       } else {
+        // TODO
         offset_ += num * sizeof(uint64_t);
       }
     }
     return true;
   }
 
-  PADDLE_ENFORCE(offset_ == buffer_.size(), "offset_ > buffer_.size()");
+  PADDLE_ENFORCE(offset_ == end_, "offset_ != end_");
   return false;
 }
 

@@ -298,9 +298,7 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
       platform::Timer outer_timer;
       platform::Timer assign_scope_timer;
       bool started = false;
-
-      scope_pool_->Receive(&scope);
-      while (true /*scope_pool_->Receive(&scope)*/) {
+      while (scope_pool_->Receive(&scope)) {
         if (!started) {
           outer_timer.Start();
           started = true;
@@ -329,10 +327,9 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
         reader_queue_->Send(reader);
         accum_num += batch_size;
 
-        //LookupTableSumConcat(scope);
+        LookupTableSumConcat(scope);
 
-        //emb_ff_scope_queue_->Send(scope);
-        //scope_pool_->Send(scope);
+        emb_ff_scope_queue_->Send(scope);
 
         ++step_cnt;
         timer.Pause();
