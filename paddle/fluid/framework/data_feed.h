@@ -159,7 +159,9 @@ class PrivateQueueDataFeed : public DataFeed {
   size_t queue_size_;
   // The queue for store parsed data
   std::unique_ptr<paddle::operators::reader::BlockingQueue<T>> queue_;
-  //std::unique_ptr<ReadWriteQueue<T>> queue_;
+
+  platform::Timer feed_timer_;
+  platform::Timer wait_timer_;
 
   platform::Timer timer0_;
   platform::Timer timer1_;
@@ -190,7 +192,10 @@ class MultiSlotType {
     }
     type_ = type;
   }
-  void InitOffset() {
+  void InitOffset(int max_batch_size=0) {
+    if (max_batch_size > 0) {
+      offset_.reserve(max_batch_size + 1);
+    }
     offset_.resize(1);
     // LoDTensor' lod is counted from 0, the size of lod
     // is one size larger than the size of data.
@@ -228,9 +233,20 @@ class MultiSlotType {
       uint64_feasign_.insert(uint64_feasign_.end(), vec.begin(), vec.end());
     }
   }
+  void AppendValues(const uint64_t* input, size_t size) {
+    CheckUint64();
+    offset_.push_back(offset_.back() + size);
+    uint64_feasign_.insert(uint64_feasign_.end(), input, input + size);
+  }
+  void AppendValues(const float* input, size_t size) {
+    CheckFloat();
+    offset_.push_back(offset_.back() + size);
+    uint64_feasign_.insert(uint64_feasign_.end(), input, input + size);
+  }
   const std::vector<float>& GetFloatData() const { return float_feasign_; }
   const std::vector<uint64_t>& GetUint64Data() const { return uint64_feasign_; }
   const std::string& GetType() const { return type_; }
+  size_t GetBatchSize() { return offset_.size() - 1; }
 
  private:
   void CheckType(const std::string& type) const {
@@ -276,12 +292,17 @@ class MultiSlotBinaryDataFeed
   virtual void Init(const paddle::framework::DataFeedDesc& data_feed_desc);
   virtual bool CheckFile(const char* filename);
 
+  virtual bool Start() override { return true; }
+  virtual int Next() override;
+
  protected:
-  int fd_;
+  int fd_{0};
   char* buffer_{nullptr};
   size_t buffer_size_{0};
   size_t end_{0};
   size_t offset_{0};
+
+  std::vector<MultiSlotType> ins_vec_;
 
   virtual void AddInstanceToInsVec(std::vector<MultiSlotType>* vec_ins,
                                    const std::vector<MultiSlotType>& instance,

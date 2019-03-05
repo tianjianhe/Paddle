@@ -51,22 +51,17 @@ void AsyncExecutor::PrepareReaders(std::vector<std::vector<std::shared_ptr<DataF
 }
 
 void AsyncExecutor::InitRootScope(const ProgramDesc& program) {
-  auto& block = program.Block(0);
+  //auto& block = program.Block(0);
 
-  PADDLE_ENFORCE_NOT_NULL(
-      root_scope_, "root_scope should be set before creating thread scope");
+  //PADDLE_ENFORCE_NOT_NULL(
+  //    root_scope_, "root_scope should be set before creating thread scope");
 
-  for (auto& var : block.AllVars()) {
-    if (var->Persistable()) {
-      auto* ptr = root_scope_->Var(var->Name());
-      InitializeVariable(ptr, var->GetType());
-    }
-  }
-
-  // TODO: check initialization
-  LoDTensor* emb_table = root_scope_->FindVar("embedding")->GetMutable<LoDTensor>();
-  emb_table->Resize({10000, 9});
-  emb_table->mutable_data<float>(platform::default_cpu());
+  //for (auto& var : block.AllVars()) {
+  //  if (var->Persistable()) {
+  //    auto* ptr = root_scope_->Var(var->Name());
+  //    InitializeVariable(ptr, var->GetType());
+  //  }
+  //}
 }
 
 void AsyncExecutor::RunFromFile(const ProgramDesc& main_program,
@@ -76,8 +71,6 @@ void AsyncExecutor::RunFromFile(const ProgramDesc& main_program,
                                 const int ncards, const int nscopes, const int nreaders,
                                 const int nemb_ff_threads, const int nemb_bp_threads,
                                 const int nasync_steps) {
-  std::vector<std::thread> threads;
-
   auto& block = main_program.Block(0);
   for (auto var_name : fetch_var_names) {
     auto var_desc = block.FindVar(var_name);
@@ -115,17 +108,18 @@ void AsyncExecutor::RunFromFile(const ProgramDesc& main_program,
 
   // prepare thread resource here
   for (int thidx = 0; thidx < actual_ncards; ++thidx) {
-    workers[thidx]->CreateThreadResource(main_program);
+    workers[thidx]->CreateThreadResource();
   }
 
+  std::vector<std::thread> threads;
   // start executing ops in multiple threads
   for (int thidx = 0; thidx < actual_ncards; ++thidx) {
     threads.push_back(
         std::thread(&ExecutorThreadWorker::TrainFiles, workers[thidx].get()));
   }
 
-  for (auto& th : threads) {
-    th.join();
+  for (auto& t : threads) {
+    t.join();
   }
   root_scope_->DropKids();
 

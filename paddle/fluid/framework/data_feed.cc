@@ -132,15 +132,20 @@ void PrivateQueueDataFeed<T>::ReadThread() {
       continue;
     }
 
+    feed_timer_.Resume();
     T instance;
     while (ParseOneInstance(&instance)) {
-      timer4_.Pause();
-      timer3_.Resume();
+      //timer4_.Pause();
+      //timer3_.Resume();
+      wait_timer_.Resume();
       queue_->Send(std::move(instance));
-      timer3_.Pause();
-      timer4_.Resume();
+      wait_timer_.Pause();
+      //timer3_.Pause();
+      //timer4_.Resume();
     }
-    timer4_.Pause();
+    //timer4_.Pause();
+    feed_timer_.Pause();
+
     Postprocess();
   }
   queue_->Close();
@@ -151,6 +156,8 @@ void PrivateQueueDataFeed<T>::ReadThread() {
   //LOG(ERROR) << "ParseOneInstance: " << timer4_.ElapsedUS() / timer4_.Count();
   //LOG(ERROR) << "LoadOneFile: " << timer5_.ElapsedUS() / timer5_.Count();
   //LOG(ERROR) << "CreateMemory: " << timer6_.ElapsedUS() / timer6_.Count();
+
+  LOG(ERROR) << "ReadThread wait ratio: " << wait_timer_.ElapsedSec() / feed_timer_.ElapsedSec() * 100 << "%";
 }
 
 template <typename T>
@@ -160,20 +167,20 @@ int PrivateQueueDataFeed<T>::Next() {
   T instance;
   T ins_vec;
   while (index < default_batch_size_) {
-    timer0_.Resume();
+    //timer0_.Resume();
     if (!queue_->Receive(&instance)) {
       break;
     }
-    timer0_.Pause();
-    timer1_.Resume();
+    //timer0_.Pause();
+    //timer1_.Resume();
     AddInstanceToInsVec(&ins_vec, instance, index++);
-    timer1_.Pause();
+    //timer1_.Pause();
   }
   batch_size_ = index;
   if (batch_size_ != 0) {
-    timer2_.Resume();
+    //timer2_.Resume();
     PutToFeedVec(ins_vec);
-    timer2_.Pause();
+    //timer2_.Pause();
   }
   return batch_size_;
 }
@@ -194,7 +201,7 @@ void MultiSlotDataFeed::Init(
       data_feed_desc.multi_slot_desc();
   SetBatchSize(data_feed_desc.batch_size());
   //SetQueueSize(data_feed_desc.batch_size());
-  SetQueueSize(data_feed_desc.batch_size() * 4);
+  SetQueueSize(data_feed_desc.batch_size() * 2);
   size_t all_slot_num = multi_slot_desc.slots_size();
   all_slots_.resize(all_slot_num);
   all_slots_type_.resize(all_slot_num);
@@ -428,8 +435,8 @@ void MultiSlotBinaryDataFeed::Init(
   paddle::framework::MultiSlotDesc multi_slot_desc =
       data_feed_desc.multi_slot_desc();
   SetBatchSize(data_feed_desc.batch_size());
-  //SetQueueSize(data_feed_desc.batch_size());
-  SetQueueSize(data_feed_desc.batch_size() * 4);
+  // TODO
+  SetQueueSize(4);
   size_t all_slot_num = multi_slot_desc.slots_size();
   all_slots_.resize(all_slot_num);
   all_slots_type_.resize(all_slot_num);
@@ -447,6 +454,8 @@ void MultiSlotBinaryDataFeed::Init(
     }
   }
   feed_vec_.resize(use_slots_.size());
+  ins_vec_.resize(use_slots_.size());
+
   finish_init_ = true;
 }
 
@@ -481,11 +490,15 @@ bool MultiSlotBinaryDataFeed::Postprocess() {
 }
 
 bool MultiSlotBinaryDataFeed::ParseOneInstance(std::vector<MultiSlotType>* instance) {
-  if (offset_ < end_) {
-    int use_slots_num = use_slots_.size();
-    instance->resize(use_slots_num);
+  if (offset_ == end_) {
+    return false;
+  }
+
+  batch_size_ = 0;
+  while (batch_size_ < default_batch_size_ && offset_ < end_) {
     for (size_t i = 0; i < use_slots_index_.size(); ++i) {
       int idx = use_slots_index_[i];
+      char type = all_slots_type_[i][0];
 
       short num = *reinterpret_cast<short*>(buffer_ + offset_);
       PADDLE_ENFORCE(num,
@@ -496,28 +509,34 @@ bool MultiSlotBinaryDataFeed::ParseOneInstance(std::vector<MultiSlotType>* insta
       offset_ += sizeof(short);
 
       if (idx != -1) {
-        (*instance)[idx].Init(all_slots_type_[i]);
-        if ((*instance)[idx].GetType()[0] == 'f') {  // float
-          (*instance)[idx].CopyValues(reinterpret_cast<float*>(buffer_ + offset_), num);
+        if (UNLIKELY(batch_size_ == 0)) {
+          ins_vec_[idx].Init(all_slots_type_[i], default_batch_size_ * num);
+          ins_vec_[idx].InitOffset(default_batch_size_);
+        }
+
+        if (type == 'f') {
+          ins_vec_[idx].AppendValues(reinterpret_cast<float*>(buffer_ + offset_), num);
           offset_ += num * sizeof(float);
-        } else if ((*instance)[idx].GetType()[0] == 'u') {  // uint64
-          (*instance)[idx].CopyValues(reinterpret_cast<uint64_t*>(buffer_ + offset_), num);
+        } else if (type == 'u') {
+          ins_vec_[idx].AppendValues(reinterpret_cast<uint64_t*>(buffer_ + offset_), num);
           offset_ += num * sizeof(uint64_t);
         }
       } else {
-        // TODO
-        offset_ += num * sizeof(uint64_t);
+        if (type == 'f') {
+          offset_ += num * sizeof(float);
+        } else if (type == 'u') {
+          offset_ += num * sizeof(uint64_t);
+        }
       }
     }
-    return true;
+    ++batch_size_;
   }
 
-  PADDLE_ENFORCE(offset_ == end_, "offset_ != end_");
-  return false;
+  PADDLE_ENFORCE(batch_size_ == default_batch_size_ || offset_ == end_, "offset_ != end_");
+  return true;
 }
 
-void MultiSlotBinaryDataFeed::AddInstanceToInsVec(
-    std::vector<MultiSlotType>* ins_vec,
+void MultiSlotBinaryDataFeed::AddInstanceToInsVec(std::vector<MultiSlotType>* ins_vec,
     const std::vector<MultiSlotType>& instance, int index) {
   if (index == 0) {
     ins_vec->resize(instance.size());
@@ -532,8 +551,7 @@ void MultiSlotBinaryDataFeed::AddInstanceToInsVec(
   }
 }
 
-void MultiSlotBinaryDataFeed::PutToFeedVec(
-    const std::vector<MultiSlotType>& ins_vec) {
+void MultiSlotBinaryDataFeed::PutToFeedVec(const std::vector<MultiSlotType>& ins_vec) {
   for (size_t i = 0; i < use_slots_.size(); ++i) {
     const auto& type = ins_vec[i].GetType();
     const auto& offset = ins_vec[i].GetOffset();
@@ -559,6 +577,28 @@ void MultiSlotBinaryDataFeed::PutToFeedVec(
       feed_vec_[i]->Resize({batch_size_, dim});
     }
   }
+}
+
+int MultiSlotBinaryDataFeed::Next() {
+  bool success = ParseOneInstance(nullptr);
+  if (success) {
+    PutToFeedVec(ins_vec_);
+    return ins_vec_[0].GetBatchSize();
+  }
+  Postprocess();
+
+  std::string filename;
+  if (!PickOneFile(&filename)) {
+    return 0;
+  }
+  if (!Preprocess(filename)) {
+    return 0;
+  }
+
+  success = ParseOneInstance(nullptr);
+  PADDLE_ENFORCE(success, "not successful");
+  PutToFeedVec(ins_vec_);
+  return ins_vec_[0].GetBatchSize();
 }
 
 }  // namespace framework

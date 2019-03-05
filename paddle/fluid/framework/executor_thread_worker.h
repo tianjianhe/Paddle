@@ -26,7 +26,7 @@ limitations under the License. */
 #include "paddle/fluid/framework/program_desc.h"
 #include "paddle/fluid/framework/scope.h"
 #include "paddle/fluid/platform/device_context.h"
-#include "nccl.h"
+#include "paddle/fluid/operators/math/blas.h"
 
 namespace paddle {
 namespace framework {
@@ -50,18 +50,20 @@ class ExecutorThreadWorker {
     gpu_place_ = platform::CUDAPlace(rank_id);
     cpu_dev_ctx_.reset(new platform::CPUDeviceContext(cpu_place_));
     gpu_dev_ctx_.reset(new platform::CUDADeviceContext(gpu_place_));
+    cpu_blas_.reset(new operators::math::BlasT<platform::CPUDeviceContext, float>(*cpu_dev_ctx_));
+    gpu_blas_.reset(new operators::math::BlasT<platform::CUDADeviceContext, float>(*gpu_dev_ctx_));
   }
 
   virtual ~ExecutorThreadWorker() {}
 
-  void CreateThreadResource(const framework::ProgramDesc& program);
+  void CreateThreadResource();
 
   // A multi-thread training function
   virtual void TrainFiles();
 
  private:
-  void CreateThreadScope(const framework::ProgramDesc& program);
-  void CreateThreadOperators(const framework::ProgramDesc& program);
+  void CreateThreadScope();
+  void CreateThreadOperators();
 
   void LookupTable(Scope* scope);
   void LookupTableGrad(Scope* scope);
@@ -69,8 +71,8 @@ class ExecutorThreadWorker {
   void LookupTableSumConcatGrad(Scope* scope);
   void StartReaders();
   void StartEmbFFThreads();
-  void StartGPUCalcThread();
   void StartEmbBPThreads();
+  void StartGPUCalc();
   void AsyncUpdateParam();
 
  protected:
@@ -98,6 +100,8 @@ class ExecutorThreadWorker {
   std::shared_ptr<platform::CPUDeviceContext> cpu_dev_ctx_;
   platform::CPUPlace cpu_place_;
   platform::CUDAPlace gpu_place_;
+  std::unique_ptr<operators::math::BlasT<platform::CPUDeviceContext, float>> cpu_blas_;
+  std::unique_ptr<operators::math::BlasT<platform::CUDADeviceContext, float>> gpu_blas_;
 
   // root scope for model parameters
   Scope* root_scope_;
@@ -122,19 +126,22 @@ class ExecutorThreadWorker {
     double reader_throughput = 0;
     double emb_ff_ratio = 0;
     double emb_ff_us = 0;
-    double emb_ff_throughput = 0;
-    double other_ratio = 0;
-    double other_us = 0;
+    double throughput = 0;
   };
   struct MainNetStat {
     double memcpy_ratio = 0;
     double memcpy_us = 0;
+    double memcpy_trp = 0;
     double gpu_ratio = 0;
     double gpu_us = 0;
+    double gpu_trp = 0;
     double other_ratio = 0;
     double other_us = 0;
+    double sync_ratio = 0;
+    double sync_us = 0;
     double main_net_ratio = 0;
     double main_net_us = 0;
+    double main_net_trp = 0;
     double throughput = 0;
   };
   struct EmbBPStat {
