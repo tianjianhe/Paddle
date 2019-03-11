@@ -39,7 +39,7 @@ class Timer {
   // Resume will get current system time
   void Resume();
   bool IsPaused();
-  int Count();
+  long Count();
   // return elapsed time in us
   double ElapsedUS();
   // return elapsed time in ms
@@ -50,8 +50,8 @@ class Timer {
  private:
   struct timeval _start;
   struct timeval _now;
-  int _count;
-  int _elapsed;
+  long _count;
+  long _elapsed;
   bool _paused;
 
   // get us difference between start and now

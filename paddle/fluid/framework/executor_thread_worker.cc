@@ -170,9 +170,8 @@ static const int news_slot_num = 44;
 void ExecutorThreadWorker::LookupTableSumConcat(Scope* scope) {
   const LoDTensor& embedding = root_scope_->FindVar("embedding")->Get<LoDTensor>();
   const float* table_data = embedding.data<float>();
-  const DDim& dims = embedding.dims();
-  const int voc_size = dims[0];
-  const int emb_size = dims[1];
+  const int voc_size = embedding.dims()[0];
+  const int emb_size = embedding.dims()[1];
 
   const int batch_size = scope->FindVar(ids_names_[0])->Get<LoDTensor>().lod()[0].size() - 1;
   PADDLE_ENFORCE(ids_names_.size() == user_slot_num + news_slot_num, "mismatch");
@@ -187,19 +186,20 @@ void ExecutorThreadWorker::LookupTableSumConcat(Scope* scope) {
   memset(news_concat_data, 0, news_concat->memory_size());
 
   float* concat_data = user_concat_data;
+  uint64_t mod_id = 0;
   for (size_t i = 0; i < ids_names_.size(); ++i) {
     if (i == user_slot_num) {
        concat_data = news_concat_data;
     }
     const LoDTensor& ids = scope->FindVar(ids_names_[i])->Get<LoDTensor>();
-    const int64_t* ids_data = ids.data<int64_t>();
+    const uint64_t* ids_data = reinterpret_cast<const uint64_t*>(ids.data<int64_t>());
     const int numel = ids.numel();
     for (int j = 0; j < numel; ++j) {
       if (ids_data[j] == padding_idx_) {
         continue;
       }
-      PADDLE_ENFORCE(ids_data[j] < voc_size, "Input id is out of the range of the vocabulary");
-      cpu_blas_->VADD(emb_size, table_data + emb_size * ids_data[j],
+      mod_id = ids_data[j] % voc_size;
+      cpu_blas_->VADD(emb_size, table_data + emb_size * mod_id,
           concat_data + emb_size * (i % user_slot_num),
           concat_data + emb_size * (i % user_slot_num));
     }
@@ -209,31 +209,34 @@ void ExecutorThreadWorker::LookupTableSumConcat(Scope* scope) {
 void ExecutorThreadWorker::LookupTableSumConcatGrad(Scope* scope) {
   LoDTensor* embedding = root_scope_->FindVar("embedding")->GetMutable<LoDTensor>();
   float* table_data = embedding->mutable_data<float>(cpu_place_);
+  const size_t voc_size = embedding->dims()[0];
   const size_t emb_size = embedding->dims()[1];
+  //TODO
+  float lr = 0.01;//scope->FindVar("learning_rate_0")->Get<LoDTensor>().data<float>()[0];
 
-  const LoDTensor& user_concat = scope->FindVar("user_concat_grad_cpu")->Get<LoDTensor>();
-  const LoDTensor& news_concat = scope->FindVar("news_concat_grad_cpu")->Get<LoDTensor>();
-  const float* user_concat_cpu_data = user_concat.data<float>();
-  const float* news_concat_cpu_data = news_concat.data<float>();
+  const LoDTensor& user_concat_grad = scope->FindVar("user_concat_grad_cpu")->Get<LoDTensor>();
+  const LoDTensor& news_concat_grad = scope->FindVar("news_concat_grad_cpu")->Get<LoDTensor>();
+  const float* user_concat_grad_data = user_concat_grad.data<float>();
+  const float* news_concat_grad_data = news_concat_grad.data<float>();
 
-  const float* concat_cpu_data = user_concat_cpu_data;
+  uint64_t mod_id = 0;
+  const float* concat_grad_data = user_concat_grad_data;
   for (size_t i = 0; i < ids_names_.size(); ++i) {
     if (i == user_slot_num) {
-      concat_cpu_data = news_concat_cpu_data;
+      concat_grad_data = news_concat_grad_data;
     }
 
     const LoDTensor& ids = scope->FindVar(ids_names_[i])->Get<LoDTensor>();
-    const int64_t* ids_data = ids.data<int64_t>();
+    const uint64_t* ids_data = reinterpret_cast<const uint64_t*>(ids.data<int64_t>());
     const int numel = ids.numel();
     for (int j = 0; j < numel; ++j) {
       if (ids_data[j] == padding_idx_) {
         continue;
       }
       // update embedding
-      cpu_blas_->VADD(emb_size,
-          concat_cpu_data + (i % user_slot_num),
-          table_data + emb_size * ids_data[j],
-          table_data + emb_size * ids_data[j]);
+      mod_id = ids_data[j] % voc_size;
+      cpu_blas_->AXPY(emb_size, -lr, concat_grad_data + (i % user_slot_num),
+          table_data + emb_size * mod_id);
     }
   }
 }
@@ -487,6 +490,10 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
         accum_num += scope->FindVar("user_concat_grad_cpu")->Get<LoDTensor>().dims()[0];
 
         LookupTableSumConcatGrad(scope);
+        //if (step_cnt % 1000 == 0) {
+        //  LogFetchValues(*scope);
+        //}
+
         scope_pool_->Send(scope);
         ++step_cnt;
 
@@ -502,13 +509,20 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
   }
 }
 
+void ExecutorThreadWorker::LogFetchValues(const Scope& scope) {
+  // TODO: inspect loss temporarily
+  for (auto& name : fetch_var_names_) {
+    float* data = scope.FindVar(name)->GetMutable<LoDTensor>()->mutable_data<float>(cpu_place_);
+    LOG(ERROR) << "r" << rank_id_ << "_loss: " << data[0];
+  }
+}
+
 void ExecutorThreadWorker::TrainFiles() {
   // TODO
   platform::SetNumThreads(1);
 
-  int fetch_var_num = fetch_var_names_.size();
   fetch_values_.clear();
-  fetch_values_.resize(fetch_var_num);
+  fetch_values_.resize(fetch_var_names_.size());
 
   StartReaders();
   StartEmbFFThreads();

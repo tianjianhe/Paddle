@@ -74,6 +74,7 @@ class ExecutorThreadWorker {
   void StartEmbBPThreads();
   void StartGPUCalc();
   void AsyncUpdateParam();
+  void LogFetchValues(const Scope& scope);
 
  protected:
   int nranks_;
@@ -118,7 +119,7 @@ class ExecutorThreadWorker {
   std::vector<std::string> ids_names_;
   std::vector<std::string> param_names_;
 
-  int64_t padding_idx_{-1};
+  uint64_t padding_idx_{0};
 
   struct EmbFFStat {
     double reader_ratio = 0;

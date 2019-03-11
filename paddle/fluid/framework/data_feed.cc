@@ -485,6 +485,7 @@ bool MultiSlotBinaryDataFeed::Preprocess(const std::string& filename) {
 }
 
 bool MultiSlotBinaryDataFeed::Postprocess() {
+  // TODO: need we do munmap?
   close(fd_);
   return true;
 }
