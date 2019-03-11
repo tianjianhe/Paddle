@@ -27,9 +27,12 @@ limitations under the License. */
 #include "paddle/fluid/framework/scope.h"
 #include "paddle/fluid/platform/device_context.h"
 #include "paddle/fluid/operators/math/blas.h"
+#include "nccl.h"
 
 namespace paddle {
 namespace framework {
+
+class AsyncExecutor;
 
 void CreateTensor(Variable* var, proto::VarType::Type var_type);
 
@@ -39,10 +42,12 @@ class ExecutorThreadWorker {
       int nemb_ff_threads, int nemb_bp_threads,
       int nasync_steps, Scope* scope, const ProgramDesc& main_program_desc,
       const std::vector<std::shared_ptr<DataFeed>>& readers,
-      const std::vector<std::string>& fetch_var_names) 
+      const std::vector<std::string>& fetch_var_names,
+      ncclComm_t* nccl_comm, AsyncExecutor* exe) 
         : nranks_(nranks), rank_id_(rank_id), nscopes_(nscopes),
         nemb_ff_threads_(nemb_ff_threads), nemb_bp_threads_(nemb_bp_threads),
-        nasync_steps_(nasync_steps), readers_(readers), root_scope_(scope) {
+        nasync_steps_(nasync_steps), readers_(readers), root_scope_(scope),
+        nccl_comm_(nccl_comm), exe_(exe) {
     main_program_.reset(new ProgramDesc(main_program_desc));
     fetch_var_names_.insert(fetch_var_names_.end(), fetch_var_names.begin(),
                             fetch_var_names.end());
@@ -52,14 +57,21 @@ class ExecutorThreadWorker {
     gpu_dev_ctx_.reset(new platform::CUDADeviceContext(gpu_place_));
     cpu_blas_.reset(new operators::math::BlasT<platform::CPUDeviceContext, float>(*cpu_dev_ctx_));
     gpu_blas_.reset(new operators::math::BlasT<platform::CUDADeviceContext, float>(*gpu_dev_ctx_));
+    
+    sync_signal_ = false;
+    cudaStreamCreate(&cuda_stream_);
   }
 
-  virtual ~ExecutorThreadWorker() {}
+  virtual ~ExecutorThreadWorker() {
+    cudaStreamDestroy(cuda_stream_);
+  }
 
   void CreateThreadResource();
 
   // A multi-thread training function
   virtual void TrainFiles();
+
+  void SetSyncSignal() { sync_signal_ = true; }
 
  private:
   void CreateThreadScope();
@@ -73,7 +85,8 @@ class ExecutorThreadWorker {
   void StartEmbFFThreads();
   void StartEmbBPThreads();
   void StartGPUCalc();
-  void AsyncUpdateParam();
+  //void AsyncUpdateParam();
+  void SyncParam();
   void LogFetchValues(const Scope& scope);
 
  protected:
@@ -83,6 +96,7 @@ class ExecutorThreadWorker {
   int nemb_ff_threads_;
   int nemb_bp_threads_;
   int nasync_steps_;
+  bool sync_signal_;
 
   cudaStream_t cuda_stream_;
 
@@ -118,6 +132,9 @@ class ExecutorThreadWorker {
   std::vector<std::thread> all_threads_;
   std::vector<std::string> ids_names_;
   std::vector<std::string> param_names_;
+
+  ncclComm_t* nccl_comm_;
+  AsyncExecutor* exe_;
 
   uint64_t padding_idx_{0};
 

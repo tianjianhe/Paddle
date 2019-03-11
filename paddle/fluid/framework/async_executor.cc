@@ -34,6 +34,24 @@ limitations under the License. */
 namespace paddle {
 namespace framework {
 
+#define CUDACHECK(cmd) do {                         \
+  cudaError_t e = cmd;                              \
+  if( e != cudaSuccess ) {                          \
+    printf("Failed: Cuda error %s:%d '%s'\n",             \
+        __FILE__,__LINE__,cudaGetErrorString(e));   \
+    exit(EXIT_FAILURE);                             \
+  }                                                 \
+} while(0)
+
+#define NCCLCHECK(cmd) do {                         \
+  ncclResult_t r = cmd;                             \
+  if (r!= ncclSuccess) {                            \
+    printf("Failed, NCCL error %s:%d '%s'\n",             \
+        __FILE__,__LINE__,platform::dynload::ncclGetErrorString(r));   \
+    exit(EXIT_FAILURE);                             \
+  }                                                 \
+} while(0)
+
 void AsyncExecutor::PrepareReaders(std::vector<std::vector<std::shared_ptr<DataFeed>>>& readers,
                                    int ncards,
                                    int nreaders,
@@ -62,6 +80,19 @@ void AsyncExecutor::InitRootScope(const ProgramDesc& program) {
   //    InitializeVariable(ptr, var->GetType());
   //  }
   //}
+}
+
+void AsyncExecutor::UpdateSyncFlag(int rank_id) {
+  uint8_t* ptr = reinterpret_cast<uint8_t*>(&sync_flag_);
+  ptr[rank_id] = 0;
+  fprintf(stderr, "r%d: %016lx\n", rank_id, sync_flag_);
+  if (sync_flag_ == sync_signal_) {
+    for (auto& worker : workers_) {
+      worker->SetSyncSignal();
+    }
+    sync_flag_ = reset_sync_flag_;
+    fprintf(stderr, "r%d: %16lx (reset)\n", rank_id, sync_flag_);
+  }
 }
 
 void AsyncExecutor::RunFromFile(const ProgramDesc& main_program,
@@ -100,28 +131,66 @@ void AsyncExecutor::RunFromFile(const ProgramDesc& main_program,
 
   InitRootScope(main_program);
 
-  std::vector<std::shared_ptr<ExecutorThreadWorker>> workers;
+  std::shared_ptr<ncclUniqueId> nccl_id;
+  ncclComm_t nccl_comms[actual_ncards];
+  if (actual_ncards > 1) {
+    nccl_id.reset(new ncclUniqueId);
+    NCCLCHECK(platform::dynload::ncclGetUniqueId(nccl_id.get()));
+
+    reset_sync_flag_ = 0;
+    uint8_t* ptr = reinterpret_cast<uint8_t*>(&reset_sync_flag_);
+    for (int i = 0; i < actual_ncards; ++i) {
+      ptr[i] = ~0;
+      fprintf(stderr, "%016lx\n", reset_sync_flag_);
+    }
+    sync_flag_ = reset_sync_flag_;
+
+    NCCLCHECK(platform::dynload::ncclGroupStart());
+    for (int i = 0; i < actual_ncards; ++i) {
+      CUDACHECK(cudaSetDevice(i));
+      NCCLCHECK(platform::dynload::ncclCommInitRank(nccl_comms + i, actual_ncards, *nccl_id, i));
+    }
+    NCCLCHECK(platform::dynload::ncclGroupEnd());
+
+    //std::vector<int> dev_vec(actual_ncards);
+    //reset_sync_flag_ = 0;
+    //uint8_t* ptr = reinterpret_cast<uint8_t*>(&reset_sync_flag_);
+    //for (int i = 0; i < actual_ncards; ++i) {
+    //  dev_vec.push_back(i);
+    //  ptr[i] = ~0;
+    //  fprintf(stderr, "%016lx\n", reset_sync_flag_);
+    //}
+    //NCCLCHECK(platform::dynload::ncclCommInitAll(nccl_comms, actual_ncards, dev_vec.data()));
+    //sync_flag_ = reset_sync_flag_;
+  }
+
   for (int i = 0; i < actual_ncards; ++i) {
-    workers.emplace_back(new ExecutorThreadWorker(actual_ncards, i, nscopes, nemb_ff_threads,
-          nemb_bp_threads, nasync_steps, root_scope_, main_program, readers[i], fetch_var_names));
+    workers_.emplace_back(new ExecutorThreadWorker(actual_ncards, i, nscopes, nemb_ff_threads,
+          nemb_bp_threads, nasync_steps, root_scope_, main_program, readers[i], fetch_var_names, nccl_comms + i, this));
   }
 
   // prepare thread resource here
   for (int thidx = 0; thidx < actual_ncards; ++thidx) {
-    workers[thidx]->CreateThreadResource();
+    workers_[thidx]->CreateThreadResource();
   }
 
   std::vector<std::thread> threads;
   // start executing ops in multiple threads
   for (int thidx = 0; thidx < actual_ncards; ++thidx) {
     threads.push_back(
-        std::thread(&ExecutorThreadWorker::TrainFiles, workers[thidx].get()));
+        std::thread(&ExecutorThreadWorker::TrainFiles, workers_[thidx].get()));
   }
 
   for (auto& t : threads) {
     t.join();
   }
   root_scope_->DropKids();
+
+  if (actual_ncards > 1) {
+    for (int i = 0; i < actual_ncards; ++i) {
+      NCCLCHECK(platform::dynload::ncclCommDestroy(nccl_comms[i]));
+    }
+  }
 
   return;
 }

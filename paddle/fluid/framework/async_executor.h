@@ -26,7 +26,6 @@ limitations under the License. */
 #include <vector>
 #include "paddle/fluid/framework/data_feed.pb.h"
 #include "paddle/fluid/framework/executor.h"
-#include "paddle/fluid/framework/executor_thread_worker.h"
 #include "paddle/fluid/framework/program_desc.h"
 #include "paddle/fluid/framework/scope.h"
 #include "nccl.h"
@@ -34,9 +33,13 @@ limitations under the License. */
 namespace paddle {
 namespace framework {
 
+class DataFeed;
+class ExecutorThreadWorker;
+
 class AsyncExecutor {
  public:
-  AsyncExecutor(Scope* scope, const platform::Place& place) : root_scope_(scope), place_(place) {}
+  AsyncExecutor(Scope* scope, const platform::Place& place)
+      : root_scope_(scope), place_(place), sync_signal_(0) {}
   virtual ~AsyncExecutor() {}
 
   void RunFromFile(const ProgramDesc& main_program,
@@ -49,6 +52,8 @@ class AsyncExecutor {
                    const int nemb_ff_threads,
                    const int nemb_bp_threads,
                    const int nasync_steps);
+
+  void UpdateSyncFlag(int rank_id);
   
  private:
   void InitRootScope(const ProgramDesc& program);
@@ -63,7 +68,12 @@ class AsyncExecutor {
   platform::Place place_;
 
  private:
-  int actual_thread_num;
+  std::mutex sync_signal_mutex_;
+  uint64_t sync_flag_;
+  uint64_t reset_sync_flag_;
+  const uint64_t sync_signal_;
+  std::vector<std::shared_ptr<ExecutorThreadWorker>> workers_;
+
 };
 
 }  // namespace framework

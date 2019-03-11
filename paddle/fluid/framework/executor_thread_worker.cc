@@ -26,6 +26,7 @@ limitations under the License. */
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/framework/reader.h"
 #include "paddle/fluid/framework/variable_helper.h"
+#include "paddle/fluid/framework/async_executor.h"
 #include "paddle/fluid/inference/io.h"
 #include "paddle/fluid/platform/cpu_helper.h"
 #include "paddle/fluid/platform/place.h"
@@ -41,6 +42,15 @@ namespace framework {
   if( e != cudaSuccess ) {                          \
     printf("Failed: Cuda error %s:%d '%s'\n",             \
         __FILE__,__LINE__,cudaGetErrorString(e));   \
+    exit(EXIT_FAILURE);                             \
+  }                                                 \
+} while(0)
+
+#define NCCLCHECK(cmd) do {                         \
+  ncclResult_t r = cmd;                             \
+  if (r!= ncclSuccess) {                            \
+    printf("Failed, NCCL error %s:%d '%s'\n",             \
+        __FILE__,__LINE__,platform::dynload::ncclGetErrorString(r));   \
     exit(EXIT_FAILURE);                             \
   }                                                 \
 } while(0)
@@ -73,17 +83,17 @@ void ExecutorThreadWorker::CreateThreadScope() {
 
       auto* thread_tensor = thread_scope_->Var(var_name)->GetMutable<LoDTensor>();
       thread_tensor->Resize(root_tensor.dims());
-      cudaMemcpy(thread_tensor->mutable_data<float>(gpu_place_),
+      CUDACHECK(cudaMemcpy(thread_tensor->mutable_data<float>(gpu_place_),
           root_tensor.data<float>(),
           root_tensor.numel() * sizeof(float),
-          cudaMemcpyHostToDevice);
+          cudaMemcpyHostToDevice));
 
       auto* param_tensor = param_scope_->Var(var_name)->GetMutable<LoDTensor>();
       param_tensor->Resize(root_tensor.dims());
-      cudaMemcpy(param_tensor->mutable_data<float>(gpu_place_),
+      CUDACHECK(cudaMemcpy(param_tensor->mutable_data<float>(gpu_place_),
           root_tensor.data<float>(),
           root_tensor.numel() * sizeof(float),
-          cudaMemcpyHostToDevice);
+          cudaMemcpyHostToDevice));
 
       // only used while synchronizing
       auto* delta_tensor = param_scope_->Var(var_name + "@DELTA")->GetMutable<LoDTensor>();
@@ -361,30 +371,62 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
   }
 }
 
-void ExecutorThreadWorker::AsyncUpdateParam() {
+//void ExecutorThreadWorker::AsyncUpdateParam() {
+//  for (const std::string& param_name : param_names_) {
+//    LoDTensor* param_tensor = param_scope_->FindVar(param_name)->GetMutable<LoDTensor>();
+//    LoDTensor* thread_tensor = thread_scope_->FindVar(param_name)->GetMutable<LoDTensor>();
+//    float* param_data = param_tensor->mutable_data<float>(gpu_place_);
+//    float* thread_data = thread_tensor->mutable_data<float>(gpu_place_);
+//    const int numel = thread_tensor->numel();
+//    gpu_blas_->AXPY(numel, -1, thread_data, param_data);
+//
+//    LoDTensor* delta_tensor = param_scope_->FindVar(param_name + "@DELTA")->GetMutable<LoDTensor>();
+//    float* delta_data = delta_tensor->mutable_data<float>(cpu_place_);
+//    cudaMemcpy(delta_data, param_data, numel * sizeof(float), cudaMemcpyDeviceToHost);
+//
+//    LoDTensor* root_tensor = root_scope_->FindVar(param_name)->GetMutable<LoDTensor>();
+//    float* root_data = root_tensor->mutable_data<float>(cpu_place_);
+//    cpu_blas_->AXPY(numel, -1, delta_data, root_data);
+//
+//    cudaMemcpy(param_data, root_data, numel * sizeof(float), cudaMemcpyHostToDevice);
+//    cudaMemcpy(thread_data, param_data, numel * sizeof(float), cudaMemcpyDeviceToDevice);
+//  }
+//}
+
+void ExecutorThreadWorker::SyncParam() {
+  if (nranks_ == 1) {
+    return;
+  }
+
+  int a;
+  cudaGetDevice(&a);
+  LOG(ERROR) << "r" << rank_id_ << ": " << a;
+  // OPTIMIZE: merge pameters into a continuous memory place
   for (const std::string& param_name : param_names_) {
-    LoDTensor* param_tensor = param_scope_->FindVar(param_name)->GetMutable<LoDTensor>();
     LoDTensor* thread_tensor = thread_scope_->FindVar(param_name)->GetMutable<LoDTensor>();
-    float* param_data = param_tensor->mutable_data<float>(gpu_place_);
     float* thread_data = thread_tensor->mutable_data<float>(gpu_place_);
     const int numel = thread_tensor->numel();
-    gpu_blas_->AXPY(numel, -1, thread_data, param_data);
-
-    LoDTensor* delta_tensor = param_scope_->FindVar(param_name + "@DELTA")->GetMutable<LoDTensor>();
-    float* delta_data = delta_tensor->mutable_data<float>(cpu_place_);
-    cudaMemcpy(delta_data, param_data, numel * sizeof(float), cudaMemcpyDeviceToHost);
-
-    LoDTensor* root_tensor = root_scope_->FindVar(param_name)->GetMutable<LoDTensor>();
-    float* root_data = root_tensor->mutable_data<float>(cpu_place_);
-    cpu_blas_->AXPY(numel, -1, delta_data, root_data);
-
-    cudaMemcpy(param_data, root_data, numel * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(thread_data, param_data, numel * sizeof(float), cudaMemcpyDeviceToDevice);
+    NCCLCHECK(platform::dynload::ncclAllReduce(thread_data, thread_data,
+        numel, ncclFloat, ncclSum, *nccl_comm_, cuda_stream_));
+    //auto a = platform::dynload::ncclAllReduce(thread_data, thread_data,
+    //    numel, ncclFloat, ncclSum, *nccl_comm_, cuda_stream_);
+    //LOG(ERROR) << "r" << rank_id_ << ": " << a;
+    //NCCLCHECK(a);
   }
+  CUDACHECK(cudaStreamSynchronize(cuda_stream_));
+
+  // TODO: scale params
+  //for (const std::string& param_name : param_names_) {
+  //  LoDTensor* thread_tensor = thread_scope_->FindVar(param_name)->GetMutable<LoDTensor>();
+  //  float* thread_data = thread_tensor->mutable_data<float>(gpu_place_);
+  //  const int numel = thread_tensor->numel();
+  //  gpu_blas_->SCAL(numel, 1.0 / nranks_, thread_data);
+  //}
 }
 
 void ExecutorThreadWorker::StartGPUCalc() {
-  int step_cnt = 0;
+  int periodic_cnt = 0;
+  long step_cnt = 0;
   long accum_num = 0;
   Scope* scope = nullptr;
   platform::Timer outer_timer;
@@ -412,8 +454,9 @@ void ExecutorThreadWorker::StartGPUCalc() {
     news_concat_gpu->Resize(news_concat_cpu.dims());
     float* user_concat_gpu_data = user_concat_gpu->mutable_data<float>(gpu_place_);
     float* news_concat_gpu_data = news_concat_gpu->mutable_data<float>(gpu_place_);
-    cudaMemcpy(user_concat_gpu_data, user_concat_cpu_data, user_concat_cpu.memory_size(), cudaMemcpyHostToDevice);
-    cudaMemcpy(news_concat_gpu_data, news_concat_cpu_data, news_concat_cpu.memory_size(), cudaMemcpyHostToDevice);
+    CUDACHECK(cudaMemcpy(user_concat_gpu_data, user_concat_cpu_data,
+          user_concat_cpu.memory_size(), cudaMemcpyHostToDevice));
+    CUDACHECK(cudaMemcpy(news_concat_gpu_data, news_concat_cpu_data, news_concat_cpu.memory_size(), cudaMemcpyHostToDevice));
     accum_num += user_concat_cpu.dims()[0];
     memcpy_timer.Pause();
 
@@ -434,19 +477,31 @@ void ExecutorThreadWorker::StartGPUCalc() {
     news_concat_grad_cpu->Resize(news_concat_grad_gpu.dims());
     float* user_concat_grad_cpu_data = user_concat_grad_cpu->mutable_data<float>(cpu_place_);
     float* news_concat_grad_cpu_data = news_concat_grad_cpu->mutable_data<float>(cpu_place_);
-    cudaMemcpy(user_concat_grad_cpu_data, user_concat_grad_gpu_data, user_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost);
-    cudaMemcpy(news_concat_grad_cpu_data, news_concat_grad_gpu_data, news_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost);
+    CUDACHECK(cudaMemcpy(user_concat_grad_cpu_data, user_concat_grad_gpu_data,
+          user_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost));
+    CUDACHECK(cudaMemcpy(news_concat_grad_cpu_data, news_concat_grad_gpu_data,
+          news_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost));
     memcpy_timer.Pause();
 
     scope->DropKids();
     emb_bp_scope_queue_->Send(scope);
 
-    if (++step_cnt % nasync_steps_ == 0) {
-      sync_timer.Resume();
-      AsyncUpdateParam();
-      sync_timer.Pause();
+    if (++periodic_cnt % nasync_steps_ == 0) {
+      //exe_->UpdateSyncFlag(rank_id_);
+      SyncParam();
     }
 
+    //if (sync_signal_) {
+    //  sync_timer.Resume();
+    //  LOG(ERROR) << "r" << rank_id_ << ": begin to sync";
+    //  SyncParam();
+    //  LOG(ERROR) << "r" << rank_id_ << ": finish syncing";
+    //  sync_signal_ = false;
+    //  periodic_cnt = 0;
+    //  sync_timer.Pause();
+    //}
+
+    ++step_cnt;
     main_timer.Pause();
   }
 
@@ -520,6 +575,8 @@ void ExecutorThreadWorker::LogFetchValues(const Scope& scope) {
 void ExecutorThreadWorker::TrainFiles() {
   // TODO
   platform::SetNumThreads(1);
+  LOG(ERROR) << "cudaSetDevice " << rank_id_;
+  CUDACHECK(cudaSetDevice(rank_id_));
 
   fetch_values_.clear();
   fetch_values_.resize(fetch_var_names_.size());
@@ -571,7 +628,7 @@ void ExecutorThreadWorker::TrainFiles() {
       static_cast<int>(main_net_stat_.memcpy_trp), static_cast<int>(main_net_stat_.gpu_trp),
       static_cast<int>(main_net_stat_.main_net_trp), main_net_stat_.sync_ratio, main_net_stat_.sync_us);
 
-  LOG(ERROR) << "Finish training";
+  LOG(ERROR) << "r" << rank_id_ << ": Finish training";
 }
 
 }  // einit_modelnd namespace framework
