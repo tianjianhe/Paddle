@@ -148,6 +148,7 @@ using VarTypeRegistry = detail::VarTypeRegistryImpl<
     operators::AlgorithmsCache<cudnnConvolutionBwdDataAlgo_t>,
     operators::AlgorithmsCache<cudnnConvolutionBwdFilterAlgo_t>,
     operators::CudnnRNNCache,
+    cudaStream_t,
 #endif
     int, float>;
 

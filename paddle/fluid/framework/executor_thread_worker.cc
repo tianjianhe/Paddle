@@ -62,6 +62,7 @@ void ExecutorThreadWorker::CreateThreadScope() {
       root_scope_, "root_scope should be set before creating thread scope");
 
   const std::vector<std::string>& input_feed = readers_[0]->GetUseSlotAlias();
+  ids_names_.clear();
   for (auto& s : input_feed) {
     if (s != "click") {
       ids_names_.push_back(s);
@@ -107,6 +108,8 @@ void ExecutorThreadWorker::CreateThreadScope() {
   scope_pool_.reset(new operators::reader::BlockingQueue<Scope*>(nscopes_));
   emb_ff_scope_queue_.reset(new operators::reader::BlockingQueue<Scope*>(nscopes_));
   emb_bp_scope_queue_.reset(new operators::reader::BlockingQueue<Scope*>(nscopes_));
+
+  cudaSetDevice(rank_id_);
   for (int i = 0; i < nscopes_; ++i) {
     Scope* scope = &thread_scope_->NewScope();
     for (auto& var : block.AllVars()) {
@@ -115,6 +118,10 @@ void ExecutorThreadWorker::CreateThreadScope() {
         InitializeVariable(ptr, var->GetType());
       }
     }
+
+    cudaStream_t* copy_stream = scope->Var("copy_stream")->GetMutable<cudaStream_t>();
+    CUDACHECK(cudaStreamCreate(copy_stream));
+
     scope_pool_->Send(scope);
   }
 
@@ -186,20 +193,20 @@ void ExecutorThreadWorker::LookupTableSumConcat(Scope* scope) {
   const int batch_size = scope->FindVar(ids_names_[0])->Get<LoDTensor>().lod()[0].size() - 1;
   PADDLE_ENFORCE(ids_names_.size() == user_slot_num + news_slot_num, "mismatch");
 
-  LoDTensor* user_concat = scope->Var("user_concat_cpu")->GetMutable<LoDTensor>();
-  LoDTensor* news_concat = scope->Var("news_concat_cpu")->GetMutable<LoDTensor>();
-  user_concat->Resize({batch_size, user_slot_num * emb_size});
-  news_concat->Resize({batch_size, news_slot_num * emb_size});
-  float* user_concat_data = user_concat->mutable_data<float>(cpu_place_);
-  float* news_concat_data = news_concat->mutable_data<float>(cpu_place_);
-  memset(user_concat_data, 0, user_concat->memory_size());
-  memset(news_concat_data, 0, news_concat->memory_size());
+  LoDTensor* user_concat_cpu = scope->Var("user_concat_cpu")->GetMutable<LoDTensor>();
+  LoDTensor* news_concat_cpu = scope->Var("news_concat_cpu")->GetMutable<LoDTensor>();
+  user_concat_cpu->Resize({batch_size, user_slot_num * emb_size});
+  news_concat_cpu->Resize({batch_size, news_slot_num * emb_size});
+  float* user_concat_cpu_data = user_concat_cpu->mutable_data<float>(cpu_place_);
+  float* news_concat_cpu_data = news_concat_cpu->mutable_data<float>(cpu_place_);
+  memset(user_concat_cpu_data, 0, user_concat_cpu->memory_size());
+  memset(news_concat_cpu_data, 0, news_concat_cpu->memory_size());
 
-  float* concat_data = user_concat_data;
+  float* concat_data = user_concat_cpu_data;
   uint64_t mod_id = 0;
   for (size_t i = 0; i < ids_names_.size(); ++i) {
     if (i == user_slot_num) {
-       concat_data = news_concat_data;
+       concat_data = news_concat_cpu_data;
     }
     const LoDTensor& ids = scope->FindVar(ids_names_[i])->Get<LoDTensor>();
     const uint64_t* ids_data = reinterpret_cast<const uint64_t*>(ids.data<int64_t>());
@@ -224,16 +231,16 @@ void ExecutorThreadWorker::LookupTableSumConcatGrad(Scope* scope) {
   //TODO
   float lr = 0.01;//scope->FindVar("learning_rate_0")->Get<LoDTensor>().data<float>()[0];
 
-  const LoDTensor& user_concat_grad = scope->FindVar("user_concat_grad_cpu")->Get<LoDTensor>();
-  const LoDTensor& news_concat_grad = scope->FindVar("news_concat_grad_cpu")->Get<LoDTensor>();
-  const float* user_concat_grad_data = user_concat_grad.data<float>();
-  const float* news_concat_grad_data = news_concat_grad.data<float>();
+  float* user_concat_grad_cpu_data =
+    scope->Var("user_concat_grad_cpu")->GetMutable<LoDTensor>()->mutable_data<float>(cpu_place_);
+  float* news_concat_grad_cpu_data =
+    scope->Var("news_concat_grad_cpu")->GetMutable<LoDTensor>()->mutable_data<float>(cpu_place_);
 
   uint64_t mod_id = 0;
-  const float* concat_grad_data = user_concat_grad_data;
+  const float* concat_grad_cpu_data = user_concat_grad_cpu_data;
   for (size_t i = 0; i < ids_names_.size(); ++i) {
     if (i == user_slot_num) {
-      concat_grad_data = news_concat_grad_data;
+      concat_grad_cpu_data = news_concat_grad_cpu_data;
     }
 
     const LoDTensor& ids = scope->FindVar(ids_names_[i])->Get<LoDTensor>();
@@ -245,7 +252,7 @@ void ExecutorThreadWorker::LookupTableSumConcatGrad(Scope* scope) {
       }
       // update embedding
       mod_id = ids_data[j] % voc_size;
-      cpu_blas_->AXPY(emb_size, -lr, concat_grad_data + (i % user_slot_num),
+      cpu_blas_->AXPY(emb_size, -lr, concat_grad_cpu_data + (i % user_slot_num),
           table_data + emb_size * mod_id);
     }
   }
@@ -311,13 +318,13 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
   reader_num_monitor_ = readers_.size();
   for (int i = 0; i < nemb_ff_threads_; ++i) {
     all_threads_.push_back(std::thread([this, i]() {
-      int step_cnt = 0;
+      long step_cnt = 0;
       int batch_size = 0;
       long accum_num = 0;
       Scope* scope = nullptr;
       DataFeed* reader = nullptr;
 
-      platform::Timer timer;
+      platform::Timer emb_ff_timer;
       platform::Timer reader_timer;
       platform::Timer outer_timer;
       bool started = false;
@@ -327,7 +334,7 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
           started = true;
         }
 
-        timer.Resume();
+        emb_ff_timer.Resume();
         //if (!reader_queue_->Receive(&reader)) {
         //  break;
         //}
@@ -342,14 +349,31 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
         }
         //reader_queue_->Send(reader);
 
-        accum_num += batch_size;
-
         LookupTableSumConcat(scope);
+
+        LoDTensor* user_concat_cpu = scope->Var("user_concat_cpu")->GetMutable<LoDTensor>();
+        LoDTensor* news_concat_cpu = scope->Var("news_concat_cpu")->GetMutable<LoDTensor>();
+        LoDTensor* user_concat_gpu = scope->FindVar("user_concat")->GetMutable<LoDTensor>();
+        LoDTensor* news_concat_gpu = scope->FindVar("news_concat")->GetMutable<LoDTensor>();
+        user_concat_gpu->Resize(user_concat_cpu->dims());
+        news_concat_gpu->Resize(news_concat_cpu->dims());
+        float* user_concat_cpu_data = user_concat_cpu->mutable_data<float>(cpu_place_);
+        float* news_concat_cpu_data = news_concat_cpu->mutable_data<float>(cpu_place_);
+        float* user_concat_gpu_data = user_concat_gpu->mutable_data<float>(gpu_place_);
+        float* news_concat_gpu_data = news_concat_gpu->mutable_data<float>(gpu_place_);
+        // asynchronously start CPU2GPU memcpy
+        cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
+        CUDACHECK(cudaMemcpyAsync(user_concat_gpu_data, user_concat_cpu_data,
+              user_concat_cpu->memory_size(), cudaMemcpyHostToDevice, *copy_stream));
+        CUDACHECK(cudaMemcpyAsync(news_concat_gpu_data, news_concat_cpu_data,
+              news_concat_cpu->memory_size(), cudaMemcpyHostToDevice, *copy_stream));
 
         emb_ff_scope_queue_->Send(scope);
 
         ++step_cnt;
-        timer.Pause();
+        accum_num += batch_size;
+
+        emb_ff_timer.Pause();
       }
       outer_timer.Pause();
 
@@ -357,6 +381,9 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
         std::lock_guard<std::mutex> lock(reader_num_mutex_);
         if (--reader_num_monitor_ <= 0) {
           //reader_queue_->Close();
+          while (emb_ff_scope_queue_->Size()) {
+            sleep(1);
+          }
           emb_ff_scope_queue_->Close();
         }
       }
@@ -364,8 +391,8 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
       emb_ff_stats_[i].reader_ratio = reader_timer.ElapsedSec() / outer_timer.ElapsedSec();
       emb_ff_stats_[i].reader_us = reader_timer.ElapsedUS() / step_cnt;
       emb_ff_stats_[i].reader_throughput = accum_num / reader_timer.ElapsedSec();
-      emb_ff_stats_[i].emb_ff_ratio = timer.ElapsedSec() / outer_timer.ElapsedSec();
-      emb_ff_stats_[i].emb_ff_us = timer.ElapsedUS() / step_cnt;
+      emb_ff_stats_[i].emb_ff_ratio = emb_ff_timer.ElapsedSec() / outer_timer.ElapsedSec();
+      emb_ff_stats_[i].emb_ff_us = emb_ff_timer.ElapsedUS() / step_cnt;
       emb_ff_stats_[i].throughput = accum_num / outer_timer.ElapsedSec();
     }));
   }
@@ -404,10 +431,11 @@ void ExecutorThreadWorker::SyncParam() {
     float* thread_data = thread_tensor->mutable_data<float>(gpu_place_);
     const int numel = thread_tensor->numel();
 
-    NCCLCHECK(platform::dynload::ncclAllReduce(thread_data, thread_data,
-        numel, ncclFloat, ncclSum, *nccl_comm_, cuda_stream_));
+    NCCLCHECK(platform::dynload::ncclAllReduce(thread_data, thread_data, numel,
+          ncclFloat, ncclSum, *nccl_comm_, gpu_dev_ctx_->stream()));
   }
-  CUDACHECK(cudaStreamSynchronize(cuda_stream_));
+  //CUDACHECK(cudaStreamSynchronize(gpu_dev_ctx_->stream()));
+  gpu_dev_ctx_->Wait();
 
   // TODO: scale params
   //for (const std::string& param_name : param_names_) {
@@ -426,7 +454,6 @@ void ExecutorThreadWorker::StartGPUCalc() {
   platform::Timer outer_timer;
   platform::Timer main_timer;
   platform::Timer gpu_timer;
-  platform::Timer memcpy_timer;
   platform::Timer sync_timer;
 
   bool started = false;
@@ -437,30 +464,22 @@ void ExecutorThreadWorker::StartGPUCalc() {
     }
 
     main_timer.Resume();
-    memcpy_timer.Resume();
-    const LoDTensor& user_concat_cpu = scope->FindVar("user_concat_cpu")->Get<LoDTensor>();
-    const LoDTensor& news_concat_cpu = scope->FindVar("news_concat_cpu")->Get<LoDTensor>();
-    const float* user_concat_cpu_data = user_concat_cpu.data<float>();
-    const float* news_concat_cpu_data = news_concat_cpu.data<float>();
-    LoDTensor* user_concat_gpu = scope->FindVar("user_concat")->GetMutable<LoDTensor>();
-    LoDTensor* news_concat_gpu = scope->FindVar("news_concat")->GetMutable<LoDTensor>();
-    user_concat_gpu->Resize(user_concat_cpu.dims());
-    news_concat_gpu->Resize(news_concat_cpu.dims());
-    float* user_concat_gpu_data = user_concat_gpu->mutable_data<float>(gpu_place_);
-    float* news_concat_gpu_data = news_concat_gpu->mutable_data<float>(gpu_place_);
-    CUDACHECK(cudaMemcpy(user_concat_gpu_data, user_concat_cpu_data,
-          user_concat_cpu.memory_size(), cudaMemcpyHostToDevice));
-    CUDACHECK(cudaMemcpy(news_concat_gpu_data, news_concat_cpu_data, news_concat_cpu.memory_size(), cudaMemcpyHostToDevice));
-    accum_num += user_concat_cpu.dims()[0];
-    memcpy_timer.Pause();
+
+    // wait for CPU2GPU memcpy finishing, as the cudaMemcpy and GPU calc are in different streams
+    CUDACHECK(cudaStreamSynchronize(*(scope->FindVar("copy_stream")->GetMutable<cudaStream_t>())));
 
     gpu_timer.Resume();
     for (auto& op : ops_) {
       op->Run(*scope, gpu_place_);
     }
+
+    // wait for GPU calc finising, as the cudaMemcpy and GPU calc are in different streams
+    gpu_dev_ctx_->Wait();
     gpu_timer.Pause();
 
-    memcpy_timer.Resume();
+    scope->DropKids();
+
+    // asynchronously start GPU2CPU memcpy
     const LoDTensor& user_concat_grad_gpu = scope->FindVar("user_concat@GRAD")->Get<LoDTensor>();
     const LoDTensor& news_concat_grad_gpu = scope->FindVar("news_concat@GRAD")->Get<LoDTensor>();
     const float* user_concat_grad_gpu_data = user_concat_grad_gpu.data<float>();
@@ -471,13 +490,12 @@ void ExecutorThreadWorker::StartGPUCalc() {
     news_concat_grad_cpu->Resize(news_concat_grad_gpu.dims());
     float* user_concat_grad_cpu_data = user_concat_grad_cpu->mutable_data<float>(cpu_place_);
     float* news_concat_grad_cpu_data = news_concat_grad_cpu->mutable_data<float>(cpu_place_);
-    CUDACHECK(cudaMemcpy(user_concat_grad_cpu_data, user_concat_grad_gpu_data,
-          user_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost));
-    CUDACHECK(cudaMemcpy(news_concat_grad_cpu_data, news_concat_grad_gpu_data,
-          news_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost));
-    memcpy_timer.Pause();
+    cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
+    CUDACHECK(cudaMemcpyAsync(user_concat_grad_cpu_data, user_concat_grad_gpu_data,
+          user_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost, *copy_stream));
+    CUDACHECK(cudaMemcpyAsync(news_concat_grad_cpu_data, news_concat_grad_gpu_data,
+          news_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost, *copy_stream));
 
-    scope->DropKids();
     emb_bp_scope_queue_->Send(scope);
 
     if (++periodic_cnt % nasync_steps_ == 0) {
@@ -493,23 +511,25 @@ void ExecutorThreadWorker::StartGPUCalc() {
     }
 
     ++step_cnt;
+    accum_num += scope->FindVar("user_concat")->Get<LoDTensor>().dims()[0];
     main_timer.Pause();
   }
 
   outer_timer.Pause();
+
+  while (emb_bp_scope_queue_->Size()) {
+    sleep(1);
+  }
   emb_bp_scope_queue_->Close();
 
-  main_net_stat_.memcpy_ratio = memcpy_timer.ElapsedSec() / outer_timer.ElapsedSec();
-  main_net_stat_.memcpy_us = memcpy_timer.ElapsedUS() / step_cnt;
-  main_net_stat_.memcpy_trp = accum_num / memcpy_timer.ElapsedSec();
   main_net_stat_.gpu_ratio = gpu_timer.ElapsedSec() / outer_timer.ElapsedSec();
   main_net_stat_.gpu_us = gpu_timer.ElapsedUS() / step_cnt;
   main_net_stat_.gpu_trp = accum_num / gpu_timer.ElapsedSec();
   main_net_stat_.main_net_ratio = main_timer.ElapsedSec() / outer_timer.ElapsedSec();
   main_net_stat_.main_net_us = main_timer.ElapsedUS() / step_cnt;
   main_net_stat_.main_net_trp = accum_num / main_timer.ElapsedSec();
-  main_net_stat_.other_ratio = main_net_stat_.main_net_ratio - main_net_stat_.memcpy_ratio - main_net_stat_.gpu_ratio;
-  main_net_stat_.other_us = main_net_stat_.main_net_us - main_net_stat_.memcpy_us - main_net_stat_.gpu_us;
+  main_net_stat_.other_ratio = main_net_stat_.main_net_ratio - main_net_stat_.gpu_ratio;
+  main_net_stat_.other_us = main_net_stat_.main_net_us - main_net_stat_.gpu_us;
   main_net_stat_.sync_ratio = sync_timer.ElapsedSec() / outer_timer.ElapsedSec();
   main_net_stat_.sync_us = sync_timer.ElapsedUS() / sync_timer.Count();
   main_net_stat_.throughput = accum_num / outer_timer.ElapsedSec();
@@ -519,10 +539,10 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
   emb_bp_stats_.resize(nemb_bp_threads_);
   for (int i = 0; i < nemb_bp_threads_; ++i) {
     all_threads_.push_back(std::thread([this, i]() {
-      int step_cnt = 0;
+      long step_cnt = 0;
       long accum_num = 0;
       Scope* scope = nullptr;
-      platform::Timer timer;
+      platform::Timer emb_bp_timer;
       platform::Timer outer_timer;
       bool started = false;
       while (emb_bp_scope_queue_->Receive(&scope)) {
@@ -531,26 +551,30 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
           started = true;
         }
 
-        timer.Resume();
+        emb_bp_timer.Resume();
 
-        accum_num += scope->FindVar("user_concat_grad_cpu")->Get<LoDTensor>().dims()[0];
+        // wait util GPU2CPU memcpy finishs for further CPU calc
+        cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
+        CUDACHECK(cudaStreamSynchronize(*copy_stream));
 
         LookupTableSumConcatGrad(scope);
         //if (step_cnt % 1000 == 0) {
         //  LogFetchValues(*scope);
         //}
 
+        accum_num += scope->FindVar("user_concat_grad_cpu")->Get<LoDTensor>().dims()[0];
+
         scope_pool_->Send(scope);
         ++step_cnt;
 
-        timer.Pause();
+        emb_bp_timer.Pause();
       }
       outer_timer.Pause();
       scope_pool_->Close();
 
-      emb_bp_stats_[i].emb_bp_ratio = timer.ElapsedSec() / outer_timer.ElapsedSec();
-      emb_bp_stats_[i].emb_bp_us = timer.ElapsedUS() / step_cnt;
-      emb_bp_stats_[i].throughput = accum_num / timer.ElapsedSec();
+      emb_bp_stats_[i].emb_bp_ratio = emb_bp_timer.ElapsedSec() / outer_timer.ElapsedSec();
+      emb_bp_stats_[i].emb_bp_us = emb_bp_timer.ElapsedUS() / step_cnt;
+      emb_bp_stats_[i].throughput = accum_num / emb_bp_timer.ElapsedSec();
     }));
   }
 }
@@ -566,7 +590,6 @@ void ExecutorThreadWorker::LogFetchValues(const Scope& scope) {
 void ExecutorThreadWorker::TrainFiles() {
   // TODO
   platform::SetNumThreads(1);
-  LOG(ERROR) << "cudaSetDevice " << rank_id_;
   CUDACHECK(cudaSetDevice(rank_id_));
 
   fetch_values_.clear();
@@ -608,16 +631,21 @@ void ExecutorThreadWorker::TrainFiles() {
       emb_bp_stat.emb_bp_ratio * 100, static_cast<int>(emb_bp_stat.emb_bp_us),
       static_cast<int>(emb_bp_stat.throughput));
 
-  fprintf(stderr, "r%d_main_net_perf memcpy:%.1f%%:%d gpu:%.1f%%:%d other:%.1f%%:%d main_net:%.1f%%:%d\n", rank_id_,
-      main_net_stat_.memcpy_ratio * 100, static_cast<int>(main_net_stat_.memcpy_us),
+  fprintf(stderr, "r%d_main_net_perf gpu:%.1f%%:%d sync:%.1f%%:%d main_net:%.1f%%:%d\n", rank_id_,
       main_net_stat_.gpu_ratio * 100, static_cast<int>(main_net_stat_.gpu_us),
-      main_net_stat_.other_ratio * 100, static_cast<int>(main_net_stat_.other_us),
+      main_net_stat_.sync_ratio * 100, static_cast<int>(main_net_stat_.sync_us),
       main_net_stat_.main_net_ratio * 100, static_cast<int>(main_net_stat_.main_net_us));
   fprintf(stderr, "r%d_THROUGHPUT:%d\n", rank_id_, static_cast<int>(main_net_stat_.throughput));
 
-  fprintf(stderr, "r%d_other_perf memcpy_trp:%d gpu_trp:%d main_net_trp:%d sync:%.1f%%:%.1f\n", rank_id_,
-      static_cast<int>(main_net_stat_.memcpy_trp), static_cast<int>(main_net_stat_.gpu_trp),
-      static_cast<int>(main_net_stat_.main_net_trp), main_net_stat_.sync_ratio, main_net_stat_.sync_us);
+  //fprintf(stderr, "r%d_other_perf gpu_trp:%d main_net_trp:%d sync:%.1f%%:%.1f\n", rank_id_,
+  //    static_cast<int>(main_net_stat_.gpu_trp),
+  //    static_cast<int>(main_net_stat_.main_net_trp), main_net_stat_.sync_ratio, main_net_stat_.sync_us);
+
+  for (Scope* scope : thread_scope_->kids()) {
+    cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
+    CUDACHECK(cudaStreamDestroy(*copy_stream));
+  }
+  thread_scope_->DropKids();
 
   LOG(ERROR) << "r" << rank_id_ << ": Finish training";
 }

@@ -53,19 +53,18 @@ class ExecutorThreadWorker {
                             fetch_var_names.end());
     cpu_place_ = platform::default_cpu();
     gpu_place_ = platform::CUDAPlace(rank_id);
-    cpu_dev_ctx_.reset(new platform::CPUDeviceContext(cpu_place_));
-    gpu_dev_ctx_.reset(new platform::CUDADeviceContext(gpu_place_));
+
+    platform::DeviceContextPool& pool = platform::DeviceContextPool::Instance();
+    cpu_dev_ctx_ = dynamic_cast<platform::CPUDeviceContext*>(pool.Get(cpu_place_));
+    gpu_dev_ctx_ = dynamic_cast<platform::CUDADeviceContext*>(pool.Get(gpu_place_));
+
     cpu_blas_.reset(new operators::math::BlasT<platform::CPUDeviceContext, float>(*cpu_dev_ctx_));
     gpu_blas_.reset(new operators::math::BlasT<platform::CUDADeviceContext, float>(*gpu_dev_ctx_));
     
     sync_signal_ = false;
-
-    cudaSetDevice(rank_id_);
-    cudaStreamCreate(&cuda_stream_);
   }
 
   virtual ~ExecutorThreadWorker() {
-    cudaStreamDestroy(cuda_stream_);
   }
 
   void CreateThreadResource();
@@ -100,8 +99,6 @@ class ExecutorThreadWorker {
   int nasync_steps_;
   bool sync_signal_;
 
-  cudaStream_t cuda_stream_;
-
   std::vector<std::shared_ptr<DataFeed>> readers_;
   int reader_num_monitor_;
   std::mutex reader_num_mutex_;
@@ -113,10 +110,10 @@ class ExecutorThreadWorker {
   // main program for training
   std::unique_ptr<framework::ProgramDesc> main_program_;
   // execution place
-  std::shared_ptr<platform::CUDADeviceContext> gpu_dev_ctx_;
-  std::shared_ptr<platform::CPUDeviceContext> cpu_dev_ctx_;
   platform::CPUPlace cpu_place_;
   platform::CUDAPlace gpu_place_;
+  platform::CUDADeviceContext* gpu_dev_ctx_;
+  platform::CPUDeviceContext* cpu_dev_ctx_;
   std::unique_ptr<operators::math::BlasT<platform::CPUDeviceContext, float>> cpu_blas_;
   std::unique_ptr<operators::math::BlasT<platform::CUDADeviceContext, float>> gpu_blas_;
 
