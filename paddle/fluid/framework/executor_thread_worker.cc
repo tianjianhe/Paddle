@@ -398,20 +398,14 @@ void ExecutorThreadWorker::SyncParam() {
     return;
   }
 
-  int a;
-  cudaGetDevice(&a);
-  LOG(ERROR) << "r" << rank_id_ << ": " << a;
   // OPTIMIZE: merge pameters into a continuous memory place
   for (const std::string& param_name : param_names_) {
     LoDTensor* thread_tensor = thread_scope_->FindVar(param_name)->GetMutable<LoDTensor>();
     float* thread_data = thread_tensor->mutable_data<float>(gpu_place_);
     const int numel = thread_tensor->numel();
+
     NCCLCHECK(platform::dynload::ncclAllReduce(thread_data, thread_data,
         numel, ncclFloat, ncclSum, *nccl_comm_, cuda_stream_));
-    //auto a = platform::dynload::ncclAllReduce(thread_data, thread_data,
-    //    numel, ncclFloat, ncclSum, *nccl_comm_, cuda_stream_);
-    //LOG(ERROR) << "r" << rank_id_ << ": " << a;
-    //NCCLCHECK(a);
   }
   CUDACHECK(cudaStreamSynchronize(cuda_stream_));
 
@@ -487,19 +481,16 @@ void ExecutorThreadWorker::StartGPUCalc() {
     emb_bp_scope_queue_->Send(scope);
 
     if (++periodic_cnt % nasync_steps_ == 0) {
-      //exe_->UpdateSyncFlag(rank_id_);
-      SyncParam();
+      exe_->UpdateSyncFlag(rank_id_);
     }
 
-    //if (sync_signal_) {
-    //  sync_timer.Resume();
-    //  LOG(ERROR) << "r" << rank_id_ << ": begin to sync";
-    //  SyncParam();
-    //  LOG(ERROR) << "r" << rank_id_ << ": finish syncing";
-    //  sync_signal_ = false;
-    //  periodic_cnt = 0;
-    //  sync_timer.Pause();
-    //}
+    if (sync_signal_) {
+      sync_timer.Resume();
+      SyncParam();
+      sync_signal_ = false;
+      periodic_cnt = 0;
+      sync_timer.Pause();
+    }
 
     ++step_cnt;
     main_timer.Pause();

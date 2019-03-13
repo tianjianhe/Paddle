@@ -59,6 +59,8 @@ class ExecutorThreadWorker {
     gpu_blas_.reset(new operators::math::BlasT<platform::CUDADeviceContext, float>(*gpu_dev_ctx_));
     
     sync_signal_ = false;
+
+    cudaSetDevice(rank_id_);
     cudaStreamCreate(&cuda_stream_);
   }
 

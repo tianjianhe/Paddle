@@ -85,13 +85,13 @@ void AsyncExecutor::InitRootScope(const ProgramDesc& program) {
 void AsyncExecutor::UpdateSyncFlag(int rank_id) {
   uint8_t* ptr = reinterpret_cast<uint8_t*>(&sync_flag_);
   ptr[rank_id] = 0;
-  fprintf(stderr, "r%d: %016lx\n", rank_id, sync_flag_);
+  //fprintf(stderr, "r%d: %016lx\n", rank_id, sync_flag_);
   if (sync_flag_ == sync_signal_) {
     for (auto& worker : workers_) {
       worker->SetSyncSignal();
     }
     sync_flag_ = reset_sync_flag_;
-    fprintf(stderr, "r%d: %16lx (reset)\n", rank_id, sync_flag_);
+    //fprintf(stderr, "r%d: %16lx (reset)\n", rank_id, sync_flag_);
   }
 }
 
@@ -151,17 +151,6 @@ void AsyncExecutor::RunFromFile(const ProgramDesc& main_program,
       NCCLCHECK(platform::dynload::ncclCommInitRank(nccl_comms + i, actual_ncards, *nccl_id, i));
     }
     NCCLCHECK(platform::dynload::ncclGroupEnd());
-
-    //std::vector<int> dev_vec(actual_ncards);
-    //reset_sync_flag_ = 0;
-    //uint8_t* ptr = reinterpret_cast<uint8_t*>(&reset_sync_flag_);
-    //for (int i = 0; i < actual_ncards; ++i) {
-    //  dev_vec.push_back(i);
-    //  ptr[i] = ~0;
-    //  fprintf(stderr, "%016lx\n", reset_sync_flag_);
-    //}
-    //NCCLCHECK(platform::dynload::ncclCommInitAll(nccl_comms, actual_ncards, dev_vec.data()));
-    //sync_flag_ = reset_sync_flag_;
   }
 
   for (int i = 0; i < actual_ncards; ++i) {
