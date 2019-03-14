@@ -52,13 +52,16 @@ class ExecutorThreadWorker {
     fetch_var_names_.insert(fetch_var_names_.end(), fetch_var_names.begin(),
                             fetch_var_names.end());
     cpu_place_ = platform::default_cpu();
+    pinned_place_ = platform::default_cuda_pinned();
     gpu_place_ = platform::CUDAPlace(rank_id);
 
     platform::DeviceContextPool& pool = platform::DeviceContextPool::Instance();
     cpu_dev_ctx_ = dynamic_cast<platform::CPUDeviceContext*>(pool.Get(cpu_place_));
+    pinned_dev_ctx_ = dynamic_cast<platform::CUDAPinnedDeviceContext*>(pool.Get(pinned_place_));
     gpu_dev_ctx_ = dynamic_cast<platform::CUDADeviceContext*>(pool.Get(gpu_place_));
 
     cpu_blas_.reset(new operators::math::BlasT<platform::CPUDeviceContext, float>(*cpu_dev_ctx_));
+    pinned_blas_.reset(new operators::math::BlasT<platform::CUDAPinnedDeviceContext, float>(*pinned_dev_ctx_));
     gpu_blas_.reset(new operators::math::BlasT<platform::CUDADeviceContext, float>(*gpu_dev_ctx_));
     
     sync_signal_ = false;
@@ -111,10 +114,13 @@ class ExecutorThreadWorker {
   std::unique_ptr<framework::ProgramDesc> main_program_;
   // execution place
   platform::CPUPlace cpu_place_;
+  platform::CUDAPinnedPlace pinned_place_;
   platform::CUDAPlace gpu_place_;
-  platform::CUDADeviceContext* gpu_dev_ctx_;
   platform::CPUDeviceContext* cpu_dev_ctx_;
+  platform::CUDAPinnedDeviceContext* pinned_dev_ctx_;
+  platform::CUDADeviceContext* gpu_dev_ctx_;
   std::unique_ptr<operators::math::BlasT<platform::CPUDeviceContext, float>> cpu_blas_;
+  std::unique_ptr<operators::math::BlasT<platform::CUDAPinnedDeviceContext, float>> pinned_blas_;
   std::unique_ptr<operators::math::BlasT<platform::CUDADeviceContext, float>> gpu_blas_;
 
   // root scope for model parameters

@@ -34,6 +34,9 @@ limitations under the License. */
 #include "paddle/fluid/pybind/pybind.h"
 #include "paddle/fluid/platform/timer.h"
 
+//#define EMB_SUM_CONCAT
+#define PASGD
+
 namespace paddle {
 namespace framework {
 
@@ -89,17 +92,17 @@ void ExecutorThreadWorker::CreateThreadScope() {
           root_tensor.numel() * sizeof(float),
           cudaMemcpyHostToDevice));
 
-      auto* param_tensor = param_scope_->Var(var_name)->GetMutable<LoDTensor>();
-      param_tensor->Resize(root_tensor.dims());
-      CUDACHECK(cudaMemcpy(param_tensor->mutable_data<float>(gpu_place_),
-          root_tensor.data<float>(),
-          root_tensor.numel() * sizeof(float),
-          cudaMemcpyHostToDevice));
+      //auto* param_tensor = param_scope_->Var(var_name)->GetMutable<LoDTensor>();
+      //param_tensor->Resize(root_tensor.dims());
+      //CUDACHECK(cudaMemcpy(param_tensor->mutable_data<float>(gpu_place_),
+      //    root_tensor.data<float>(),
+      //    root_tensor.numel() * sizeof(float),
+      //    cudaMemcpyHostToDevice));
 
-      // only used while synchronizing
-      auto* delta_tensor = param_scope_->Var(var_name + "@DELTA")->GetMutable<LoDTensor>();
-      delta_tensor->Resize(root_tensor.dims());
-      delta_tensor->mutable_data<float>(cpu_place_);
+      //// only used while synchronizing
+      //auto* delta_tensor = param_scope_->Var(var_name + "@DELTA")->GetMutable<LoDTensor>();
+      //delta_tensor->Resize(root_tensor.dims());
+      //delta_tensor->mutable_data<float>(cpu_place_);
     }
   }
 
@@ -180,6 +183,73 @@ static void print_fetch_var(Scope* scope, const std::string& var_name) {
   VLOG(1) << "print_fetch_var: unrecognized data type:" << tensor.type();
 }
 
+void ExecutorThreadWorker::LookupTable(Scope* scope) {
+  const LoDTensor& embedding = root_scope_->FindVar("embedding")->Get<LoDTensor>();
+  const float* table_data = embedding.data<float>();
+  const int voc_size = embedding.dims()[0];
+  const int emb_size = embedding.dims()[1];
+
+  for (size_t i = 0; i < ids_names_.size(); ++i) {
+    const LoDTensor& ids = scope->FindVar(ids_names_[i])->Get<LoDTensor>();
+    LoDTensor* emb_cpu = scope->Var(ids_names_[i] + "_emb_cpu")->GetMutable<LoDTensor>();
+    emb_cpu->set_lod(ids.lod());
+    DDim d = ids.dims();
+    d[1] = emb_size;
+    emb_cpu->Resize(d);
+    const uint64_t* ids_data = reinterpret_cast<const uint64_t*>(ids.data<int64_t>());
+    float* emb_cpu_data = emb_cpu->mutable_data<float>(pinned_place_);
+    const int numel = ids.numel();
+    for (int j = 0; j < numel; ++j) {
+      if (ids_data[j] == padding_idx_) {
+        memset(emb_cpu_data + emb_size * j, 0, emb_size * sizeof(float));
+        continue;
+      }
+
+      uint64_t mod_id = ids_data[j] % voc_size;
+      memcpy(emb_cpu_data + emb_size * j, table_data + emb_size * mod_id,
+          emb_size * sizeof(float));
+    }
+
+    LoDTensor* emb_gpu = scope->FindVar(ids_names_[i] + "_emb")->GetMutable<LoDTensor>();
+    emb_gpu->set_lod(emb_cpu->lod());
+    emb_gpu->Resize(emb_cpu->dims());
+    float* emb_gpu_data = emb_gpu->mutable_data<float>(gpu_place_);
+    cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
+    CUDACHECK(cudaMemcpyAsync(emb_gpu_data, emb_cpu_data, emb_cpu->memory_size(),
+        cudaMemcpyHostToDevice, *copy_stream));
+  }
+}
+
+void ExecutorThreadWorker::LookupTableGrad(Scope* scope) {
+  // wait util GPU2CPU memcpy finishs for further CPU calc
+  cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
+  CUDACHECK(cudaStreamSynchronize(*copy_stream));
+
+  LoDTensor* embedding = root_scope_->FindVar("embedding")->GetMutable<LoDTensor>();
+  float* table_data = embedding->mutable_data<float>(cpu_place_);
+  const size_t voc_size = embedding->dims()[0];
+  const int emb_size = embedding->dims()[1];
+  //TODO
+  float lr = 0.01;//scope->FindVar("learning_rate_0")->Get<LoDTensor>().data<float>()[0];
+
+  for (size_t i = 0; i < ids_names_.size(); ++i) {
+    LoDTensor* emb_grad_cpu = scope->Var(ids_names_[i] + "_emb_grad_cpu")->GetMutable<LoDTensor>();
+    float* emb_grad_cpu_data = emb_grad_cpu->mutable_data<float>(pinned_place_);
+
+    const LoDTensor& ids = scope->FindVar(ids_names_[i])->Get<LoDTensor>();
+    const uint64_t* ids_data = reinterpret_cast<const uint64_t*>(ids.data<int64_t>());
+    const int numel = ids.numel();
+    for (int j = 0; j < numel; ++j) {
+      if (ids_data[j] == padding_idx_) {
+        continue;
+      }
+      uint64_t mod_id = ids_data[j] % voc_size;
+      cpu_blas_->AXPY(emb_size, -lr, emb_grad_cpu_data + emb_size * j,
+          table_data + emb_size * mod_id);
+    }
+  }
+}
+
 // OPTIMIZE: hard coding
 static const int user_slot_num = 73;
 static const int news_slot_num = 44;
@@ -197,115 +267,96 @@ void ExecutorThreadWorker::LookupTableSumConcat(Scope* scope) {
   LoDTensor* news_concat_cpu = scope->Var("news_concat_cpu")->GetMutable<LoDTensor>();
   user_concat_cpu->Resize({batch_size, user_slot_num * emb_size});
   news_concat_cpu->Resize({batch_size, news_slot_num * emb_size});
-  float* user_concat_cpu_data = user_concat_cpu->mutable_data<float>(cpu_place_);
-  float* news_concat_cpu_data = news_concat_cpu->mutable_data<float>(cpu_place_);
+  float* user_concat_cpu_data = user_concat_cpu->mutable_data<float>(pinned_place_);
+  float* news_concat_cpu_data = news_concat_cpu->mutable_data<float>(pinned_place_);
   memset(user_concat_cpu_data, 0, user_concat_cpu->memory_size());
   memset(news_concat_cpu_data, 0, news_concat_cpu->memory_size());
 
   float* concat_data = user_concat_cpu_data;
-  uint64_t mod_id = 0;
+  int concat_size = emb_size * user_slot_num;
   for (size_t i = 0; i < ids_names_.size(); ++i) {
     if (i == user_slot_num) {
-       concat_data = news_concat_cpu_data;
+      concat_data = news_concat_cpu_data;
+      concat_size = emb_size * news_slot_num;
     }
+    const int slot_idx = i % user_slot_num;
+
     const LoDTensor& ids = scope->FindVar(ids_names_[i])->Get<LoDTensor>();
     const uint64_t* ids_data = reinterpret_cast<const uint64_t*>(ids.data<int64_t>());
-    const int numel = ids.numel();
-    for (int j = 0; j < numel; ++j) {
-      if (ids_data[j] == padding_idx_) {
-        continue;
+    const auto& lod = ids.lod()[0];
+    for (int bs = 0; bs < batch_size; ++bs) {
+      int end = lod[bs + 1];
+      for (int offset = lod[bs]; offset < end; ++offset) {
+        if (ids_data[offset] == padding_idx_) {
+          continue;
+        }
+
+        uint64_t mod_id = ids_data[offset] % voc_size;
+        cpu_blas_->VADD(emb_size, table_data + emb_size * mod_id,
+            concat_data + concat_size * bs + emb_size * slot_idx,
+            concat_data + concat_size * bs + emb_size * slot_idx);
       }
-      mod_id = ids_data[j] % voc_size;
-      cpu_blas_->VADD(emb_size, table_data + emb_size * mod_id,
-          concat_data + emb_size * (i % user_slot_num),
-          concat_data + emb_size * (i % user_slot_num));
     }
   }
+
+  LoDTensor* user_concat_gpu = scope->FindVar("user_concat")->GetMutable<LoDTensor>();
+  LoDTensor* news_concat_gpu = scope->FindVar("news_concat")->GetMutable<LoDTensor>();
+  user_concat_gpu->Resize(user_concat_cpu->dims());
+  news_concat_gpu->Resize(news_concat_cpu->dims());
+  float* user_concat_gpu_data = user_concat_gpu->mutable_data<float>(gpu_place_);
+  float* news_concat_gpu_data = news_concat_gpu->mutable_data<float>(gpu_place_);
+
+  cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
+  CUDACHECK(cudaMemcpyAsync(user_concat_gpu_data, user_concat_cpu_data,
+        user_concat_cpu->memory_size(), cudaMemcpyHostToDevice, *copy_stream));
+  CUDACHECK(cudaMemcpyAsync(news_concat_gpu_data, news_concat_cpu_data,
+        news_concat_cpu->memory_size(), cudaMemcpyHostToDevice, *copy_stream));
 }
 
 void ExecutorThreadWorker::LookupTableSumConcatGrad(Scope* scope) {
+  // wait util GPU2CPU memcpy finishs for further CPU calc
+  cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
+  CUDACHECK(cudaStreamSynchronize(*copy_stream));
+
   LoDTensor* embedding = root_scope_->FindVar("embedding")->GetMutable<LoDTensor>();
   float* table_data = embedding->mutable_data<float>(cpu_place_);
   const size_t voc_size = embedding->dims()[0];
   const size_t emb_size = embedding->dims()[1];
+  const int batch_size = scope->FindVar(ids_names_[0])->Get<LoDTensor>().lod()[0].size() - 1;
   //TODO
   float lr = 0.01;//scope->FindVar("learning_rate_0")->Get<LoDTensor>().data<float>()[0];
 
   float* user_concat_grad_cpu_data =
-    scope->Var("user_concat_grad_cpu")->GetMutable<LoDTensor>()->mutable_data<float>(cpu_place_);
+    scope->Var("user_concat_grad_cpu")->GetMutable<LoDTensor>()->mutable_data<float>(pinned_place_);
   float* news_concat_grad_cpu_data =
-    scope->Var("news_concat_grad_cpu")->GetMutable<LoDTensor>()->mutable_data<float>(cpu_place_);
+    scope->Var("news_concat_grad_cpu")->GetMutable<LoDTensor>()->mutable_data<float>(pinned_place_);
 
-  uint64_t mod_id = 0;
   const float* concat_grad_cpu_data = user_concat_grad_cpu_data;
+  int concat_size = emb_size * user_slot_num;
   for (size_t i = 0; i < ids_names_.size(); ++i) {
     if (i == user_slot_num) {
       concat_grad_cpu_data = news_concat_grad_cpu_data;
+      concat_size = emb_size * news_slot_num;
     }
+    const int slot_idx = i % user_slot_num;
 
     const LoDTensor& ids = scope->FindVar(ids_names_[i])->Get<LoDTensor>();
     const uint64_t* ids_data = reinterpret_cast<const uint64_t*>(ids.data<int64_t>());
-    const int numel = ids.numel();
-    for (int j = 0; j < numel; ++j) {
-      if (ids_data[j] == padding_idx_) {
-        continue;
+    const auto& lod = ids.lod()[0];
+    for (int bs = 0; bs < batch_size; ++bs) {
+      int end = lod[bs + 1];
+      for (int offset = lod[bs]; offset < end; ++offset) {
+        if (ids_data[offset] == padding_idx_) {
+          continue;
+        }
+
+        uint64_t mod_id = ids_data[offset] % voc_size;
+        cpu_blas_->AXPY(emb_size, -lr, concat_grad_cpu_data + concat_size * bs + emb_size * slot_idx,
+            table_data + emb_size * mod_id);
       }
-      // update embedding
-      mod_id = ids_data[j] % voc_size;
-      cpu_blas_->AXPY(emb_size, -lr, concat_grad_cpu_data + (i % user_slot_num),
-          table_data + emb_size * mod_id);
     }
   }
 }
-
-//void ExecutorThreadWorker::LookupTable(Scope* scope) {
-//  const LoDTensor& embedding = root_scope_->FindVar("embedding")->Get<LoDTensor>();
-//  const float* table_data = embedding.data<float>();
-//  const DDim& dims = embedding.dims();
-//  PADDLE_ENFORCE(dims.size() == 2, "embedding dims size is not equel to 2");
-//  const int voc_size = dims[0];
-//  const int emb_size = dims[1];
-//  for (size_t i = 0; i < ids_names_.size(); ++i) {
-//    const LoDTensor& ids = scope->FindVar(ids_names_[i])->Get<LoDTensor>();
-//    LoDTensor* emb_cpu = scope->Var(emb_cpu_names_[i])->GetMutable<LoDTensor>();
-//    emb_cpu->set_lod(ids.lod());
-//    DDim d = ids.dims();
-//    d[1] = emb_size;
-//    emb_cpu->Resize(d);
-//    const int64_t* ids_data = ids.data<int64_t>();
-//    float* emb_cpu_data = emb_cpu->mutable_data<float>(cpu_place_);
-//    const int numel = ids.numel();
-//    for (int j = 0; j < numel; ++j) {
-//      if (ids_data[j] == padding_idx_) {
-//        memset(emb_cpu_data + emb_size * j, 0, emb_size * sizeof(float));
-//        continue;
-//      }
-//      PADDLE_ENFORCE(ids_data[j] < voc_size, "Input id is out of the range of the vocabulary");
-//      memcpy(emb_cpu_data + emb_size * j, table_data + emb_size * ids_data[j], emb_size * sizeof(float));
-//    }
-//  }
-//}
-//
-//void ExecutorThreadWorker::LookupTableGrad(Scope* scope) {
-//  LoDTensor* embedding = root_scope_->FindVar("embedding")->GetMutable<LoDTensor>();
-//  float* table_data = embedding->mutable_data<float>(cpu_place_);
-//  const size_t emb_size = embedding->dims()[1];
-//  for (size_t i = 0; i < ids_names_.size(); ++i) {
-//    LoDTensor* emb_grad_cpu = scope->FindVar(emb_grad_cpu_names_[i])->GetMutable<LoDTensor>();
-//    float* emb_grad_cpu_data = emb_grad_cpu->mutable_data<float>(cpu_place_);
-//
-//    const LoDTensor& ids = scope->FindVar(ids_names_[i])->Get<LoDTensor>();
-//    const int64_t* ids_data = ids.data<int64_t>();
-//    const int numel = ids.numel();
-//    for (int j = 0; j < numel; ++j) {
-//      if (ids_data[j] == padding_idx_) {
-//        continue;
-//      }
-//      // update embedding
-//      memcpy(table_data + emb_size * ids_data[j], emb_grad_cpu_data + emb_size * j, emb_size * sizeof(float));
-//    }
-//  }
-//}
 
 void ExecutorThreadWorker::StartReaders() {
   for (auto& reader : readers_) {
@@ -349,24 +400,11 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
         }
         //reader_queue_->Send(reader);
 
+#ifdef EMB_SUM_CONCAT
         LookupTableSumConcat(scope);
-
-        LoDTensor* user_concat_cpu = scope->Var("user_concat_cpu")->GetMutable<LoDTensor>();
-        LoDTensor* news_concat_cpu = scope->Var("news_concat_cpu")->GetMutable<LoDTensor>();
-        LoDTensor* user_concat_gpu = scope->FindVar("user_concat")->GetMutable<LoDTensor>();
-        LoDTensor* news_concat_gpu = scope->FindVar("news_concat")->GetMutable<LoDTensor>();
-        user_concat_gpu->Resize(user_concat_cpu->dims());
-        news_concat_gpu->Resize(news_concat_cpu->dims());
-        float* user_concat_cpu_data = user_concat_cpu->mutable_data<float>(cpu_place_);
-        float* news_concat_cpu_data = news_concat_cpu->mutable_data<float>(cpu_place_);
-        float* user_concat_gpu_data = user_concat_gpu->mutable_data<float>(gpu_place_);
-        float* news_concat_gpu_data = news_concat_gpu->mutable_data<float>(gpu_place_);
-        // asynchronously start CPU2GPU memcpy
-        cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
-        CUDACHECK(cudaMemcpyAsync(user_concat_gpu_data, user_concat_cpu_data,
-              user_concat_cpu->memory_size(), cudaMemcpyHostToDevice, *copy_stream));
-        CUDACHECK(cudaMemcpyAsync(news_concat_gpu_data, news_concat_cpu_data,
-              news_concat_cpu->memory_size(), cudaMemcpyHostToDevice, *copy_stream));
+#else
+        LookupTable(scope);
+#endif
 
         emb_ff_scope_queue_->Send(scope);
 
@@ -394,6 +432,50 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
       emb_ff_stats_[i].emb_ff_ratio = emb_ff_timer.ElapsedSec() / outer_timer.ElapsedSec();
       emb_ff_stats_[i].emb_ff_us = emb_ff_timer.ElapsedUS() / step_cnt;
       emb_ff_stats_[i].throughput = accum_num / outer_timer.ElapsedSec();
+    }));
+  }
+}
+
+void ExecutorThreadWorker::StartEmbBPThreads() {
+  emb_bp_stats_.resize(nemb_bp_threads_);
+  for (int i = 0; i < nemb_bp_threads_; ++i) {
+    all_threads_.push_back(std::thread([this, i]() {
+      long step_cnt = 0;
+      long accum_num = 0;
+      Scope* scope = nullptr;
+      platform::Timer emb_bp_timer;
+      platform::Timer outer_timer;
+      bool started = false;
+      while (emb_bp_scope_queue_->Receive(&scope)) {
+        if (!started) {
+          outer_timer.Start();
+          started = true;
+        }
+
+        emb_bp_timer.Resume();
+
+#ifdef EMB_SUM_CONCAT
+        LookupTableSumConcatGrad(scope);
+#else
+        LookupTableGrad(scope);
+#endif
+
+        //if (step_cnt % 1000 == 0) {
+        //  LogFetchValues(*scope);
+        //}
+
+        scope_pool_->Send(scope);
+        ++step_cnt;
+        accum_num += scope->FindVar(ids_names_[0])->Get<LoDTensor>().dims()[0];
+
+        emb_bp_timer.Pause();
+      }
+      outer_timer.Pause();
+      scope_pool_->Close();
+
+      emb_bp_stats_[i].emb_bp_ratio = emb_bp_timer.ElapsedSec() / outer_timer.ElapsedSec();
+      emb_bp_stats_[i].emb_bp_us = emb_bp_timer.ElapsedUS() / step_cnt;
+      emb_bp_stats_[i].throughput = accum_num / emb_bp_timer.ElapsedSec();
     }));
   }
 }
@@ -480,6 +562,7 @@ void ExecutorThreadWorker::StartGPUCalc() {
     scope->DropKids();
 
     // asynchronously start GPU2CPU memcpy
+#ifdef EMB_SUM_CONCAT
     const LoDTensor& user_concat_grad_gpu = scope->FindVar("user_concat@GRAD")->Get<LoDTensor>();
     const LoDTensor& news_concat_grad_gpu = scope->FindVar("news_concat@GRAD")->Get<LoDTensor>();
     const float* user_concat_grad_gpu_data = user_concat_grad_gpu.data<float>();
@@ -488,13 +571,27 @@ void ExecutorThreadWorker::StartGPUCalc() {
     LoDTensor* news_concat_grad_cpu = scope->Var("news_concat_grad_cpu")->GetMutable<LoDTensor>();
     user_concat_grad_cpu->Resize(user_concat_grad_gpu.dims());
     news_concat_grad_cpu->Resize(news_concat_grad_gpu.dims());
-    float* user_concat_grad_cpu_data = user_concat_grad_cpu->mutable_data<float>(cpu_place_);
-    float* news_concat_grad_cpu_data = news_concat_grad_cpu->mutable_data<float>(cpu_place_);
+    float* user_concat_grad_cpu_data = user_concat_grad_cpu->mutable_data<float>(pinned_place_);
+    float* news_concat_grad_cpu_data = news_concat_grad_cpu->mutable_data<float>(pinned_place_);
     cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
     CUDACHECK(cudaMemcpyAsync(user_concat_grad_cpu_data, user_concat_grad_gpu_data,
           user_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost, *copy_stream));
     CUDACHECK(cudaMemcpyAsync(news_concat_grad_cpu_data, news_concat_grad_gpu_data,
           news_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost, *copy_stream));
+#else
+    for (size_t i = 0; i < ids_names_.size(); ++i) {
+      const LoDTensor& emb_grad_gpu = scope->FindVar(ids_names_[i] + "_emb@GRAD")->Get<LoDTensor>();
+      const float* emb_grad_gpu_data = emb_grad_gpu.data<float>();
+      LoDTensor* emb_grad_cpu = scope->Var(ids_names_[i] + "_emb_grad_cpu")->GetMutable<LoDTensor>();
+      emb_grad_cpu->Resize(emb_grad_gpu.dims());
+      float* emb_grad_cpu_data = emb_grad_cpu->mutable_data<float>(pinned_place_);
+      cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
+      sync_timer.Resume();
+      CUDACHECK(cudaMemcpyAsync(emb_grad_cpu_data, emb_grad_gpu_data, emb_grad_gpu.memory_size(),
+            cudaMemcpyDeviceToHost, *copy_stream));
+      sync_timer.Pause();
+    }
+#endif
 
     emb_bp_scope_queue_->Send(scope);
 
@@ -503,15 +600,13 @@ void ExecutorThreadWorker::StartGPUCalc() {
     }
 
     if (sync_signal_) {
-      sync_timer.Resume();
       SyncParam();
       sync_signal_ = false;
       periodic_cnt = 0;
-      sync_timer.Pause();
     }
 
     ++step_cnt;
-    accum_num += scope->FindVar("user_concat")->Get<LoDTensor>().dims()[0];
+    accum_num += scope->FindVar(ids_names_[0])->Get<LoDTensor>().dims()[0];
     main_timer.Pause();
   }
 
@@ -535,54 +630,10 @@ void ExecutorThreadWorker::StartGPUCalc() {
   main_net_stat_.throughput = accum_num / outer_timer.ElapsedSec();
 }
 
-void ExecutorThreadWorker::StartEmbBPThreads() {
-  emb_bp_stats_.resize(nemb_bp_threads_);
-  for (int i = 0; i < nemb_bp_threads_; ++i) {
-    all_threads_.push_back(std::thread([this, i]() {
-      long step_cnt = 0;
-      long accum_num = 0;
-      Scope* scope = nullptr;
-      platform::Timer emb_bp_timer;
-      platform::Timer outer_timer;
-      bool started = false;
-      while (emb_bp_scope_queue_->Receive(&scope)) {
-        if (!started) {
-          outer_timer.Start();
-          started = true;
-        }
-
-        emb_bp_timer.Resume();
-
-        // wait util GPU2CPU memcpy finishs for further CPU calc
-        cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
-        CUDACHECK(cudaStreamSynchronize(*copy_stream));
-
-        LookupTableSumConcatGrad(scope);
-        //if (step_cnt % 1000 == 0) {
-        //  LogFetchValues(*scope);
-        //}
-
-        accum_num += scope->FindVar("user_concat_grad_cpu")->Get<LoDTensor>().dims()[0];
-
-        scope_pool_->Send(scope);
-        ++step_cnt;
-
-        emb_bp_timer.Pause();
-      }
-      outer_timer.Pause();
-      scope_pool_->Close();
-
-      emb_bp_stats_[i].emb_bp_ratio = emb_bp_timer.ElapsedSec() / outer_timer.ElapsedSec();
-      emb_bp_stats_[i].emb_bp_us = emb_bp_timer.ElapsedUS() / step_cnt;
-      emb_bp_stats_[i].throughput = accum_num / emb_bp_timer.ElapsedSec();
-    }));
-  }
-}
-
 void ExecutorThreadWorker::LogFetchValues(const Scope& scope) {
   // TODO: inspect loss temporarily
   for (auto& name : fetch_var_names_) {
-    float* data = scope.FindVar(name)->GetMutable<LoDTensor>()->mutable_data<float>(cpu_place_);
+    float* data = scope.FindVar(name)->GetMutable<LoDTensor>()->mutable_data<float>(pinned_place_);
     LOG(ERROR) << "r" << rank_id_ << "_loss: " << data[0];
   }
 }
