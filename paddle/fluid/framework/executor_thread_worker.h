@@ -160,6 +160,8 @@ class ExecutorThreadWorker {
     double gpu_trp = 0;
     double other_ratio = 0;
     double other_us = 0;
+    double wait_ratio = 0;
+    double wait_us = 0;
     double sync_ratio = 0;
     double sync_us = 0;
     double main_net_ratio = 0;
@@ -170,6 +172,8 @@ class ExecutorThreadWorker {
   struct EmbBPStat {
     double emb_bp_ratio = 0;
     double emb_bp_us = 0;
+    double wait_ratio = 0;
+    double wait_us = 0;
     double throughput = 0;
   };
 

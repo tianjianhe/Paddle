@@ -34,7 +34,7 @@ limitations under the License. */
 #include "paddle/fluid/pybind/pybind.h"
 #include "paddle/fluid/platform/timer.h"
 
-//#define EMB_SUM_CONCAT
+#define EMB_SUM_CONCAT
 #define PASGD
 
 namespace paddle {
@@ -221,10 +221,6 @@ void ExecutorThreadWorker::LookupTable(Scope* scope) {
 }
 
 void ExecutorThreadWorker::LookupTableGrad(Scope* scope) {
-  // wait util GPU2CPU memcpy finishs for further CPU calc
-  cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
-  CUDACHECK(cudaStreamSynchronize(*copy_stream));
-
   LoDTensor* embedding = root_scope_->FindVar("embedding")->GetMutable<LoDTensor>();
   float* table_data = embedding->mutable_data<float>(cpu_place_);
   const size_t voc_size = embedding->dims()[0];
@@ -314,10 +310,6 @@ void ExecutorThreadWorker::LookupTableSumConcat(Scope* scope) {
 }
 
 void ExecutorThreadWorker::LookupTableSumConcatGrad(Scope* scope) {
-  // wait util GPU2CPU memcpy finishs for further CPU calc
-  cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
-  CUDACHECK(cudaStreamSynchronize(*copy_stream));
-
   LoDTensor* embedding = root_scope_->FindVar("embedding")->GetMutable<LoDTensor>();
   float* table_data = embedding->mutable_data<float>(cpu_place_);
   const size_t voc_size = embedding->dims()[0];
@@ -426,6 +418,8 @@ void ExecutorThreadWorker::StartEmbFFThreads() {
         }
       }
 
+      LOG(ERROR) << "r" << rank_id_ << "t" << i << "_emb_ff_steps: " << step_cnt;
+
       emb_ff_stats_[i].reader_ratio = reader_timer.ElapsedSec() / outer_timer.ElapsedSec();
       emb_ff_stats_[i].reader_us = reader_timer.ElapsedUS() / step_cnt;
       emb_ff_stats_[i].reader_throughput = accum_num / reader_timer.ElapsedSec();
@@ -444,6 +438,7 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
       long accum_num = 0;
       Scope* scope = nullptr;
       platform::Timer emb_bp_timer;
+      platform::Timer wait_timer;
       platform::Timer outer_timer;
       bool started = false;
       while (emb_bp_scope_queue_->Receive(&scope)) {
@@ -453,6 +448,12 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
         }
 
         emb_bp_timer.Resume();
+
+        wait_timer.Resume();
+        // wait util GPU2CPU memcpy finishs for further CPU calc
+        cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
+        CUDACHECK(cudaStreamSynchronize(*copy_stream));
+        wait_timer.Pause();
 
 #ifdef EMB_SUM_CONCAT
         LookupTableSumConcatGrad(scope);
@@ -473,8 +474,12 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
       outer_timer.Pause();
       scope_pool_->Close();
 
+      LOG(ERROR) << "r" << rank_id_ << "t" << i << "_emb_bp_steps: " << step_cnt;
+
       emb_bp_stats_[i].emb_bp_ratio = emb_bp_timer.ElapsedSec() / outer_timer.ElapsedSec();
       emb_bp_stats_[i].emb_bp_us = emb_bp_timer.ElapsedUS() / step_cnt;
+      emb_bp_stats_[i].wait_ratio = wait_timer.ElapsedSec() / outer_timer.ElapsedSec();
+      emb_bp_stats_[i].wait_us = wait_timer.ElapsedUS() / step_cnt;
       emb_bp_stats_[i].throughput = accum_num / emb_bp_timer.ElapsedSec();
     }));
   }
@@ -536,6 +541,7 @@ void ExecutorThreadWorker::StartGPUCalc() {
   platform::Timer outer_timer;
   platform::Timer main_timer;
   platform::Timer gpu_timer;
+  platform::Timer wait_timer;
   platform::Timer sync_timer;
 
   bool started = false;
@@ -547,17 +553,21 @@ void ExecutorThreadWorker::StartGPUCalc() {
 
     main_timer.Resume();
 
+    wait_timer.Resume();
     // wait for CPU2GPU memcpy finishing, as the cudaMemcpy and GPU calc are in different streams
     CUDACHECK(cudaStreamSynchronize(*(scope->FindVar("copy_stream")->GetMutable<cudaStream_t>())));
+    wait_timer.Pause();
 
     gpu_timer.Resume();
     for (auto& op : ops_) {
       op->Run(*scope, gpu_place_);
     }
+    gpu_timer.Pause();
 
+    wait_timer.Resume();
     // wait for GPU calc finising, as the cudaMemcpy and GPU calc are in different streams
     gpu_dev_ctx_->Wait();
-    gpu_timer.Pause();
+    wait_timer.Pause();
 
     scope->DropKids();
 
@@ -574,10 +584,12 @@ void ExecutorThreadWorker::StartGPUCalc() {
     float* user_concat_grad_cpu_data = user_concat_grad_cpu->mutable_data<float>(pinned_place_);
     float* news_concat_grad_cpu_data = news_concat_grad_cpu->mutable_data<float>(pinned_place_);
     cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
+    wait_timer.Resume();
     CUDACHECK(cudaMemcpyAsync(user_concat_grad_cpu_data, user_concat_grad_gpu_data,
           user_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost, *copy_stream));
     CUDACHECK(cudaMemcpyAsync(news_concat_grad_cpu_data, news_concat_grad_gpu_data,
           news_concat_grad_gpu.memory_size(), cudaMemcpyDeviceToHost, *copy_stream));
+    wait_timer.Pause();
 #else
     for (size_t i = 0; i < ids_names_.size(); ++i) {
       const LoDTensor& emb_grad_gpu = scope->FindVar(ids_names_[i] + "_emb@GRAD")->Get<LoDTensor>();
@@ -586,10 +598,9 @@ void ExecutorThreadWorker::StartGPUCalc() {
       emb_grad_cpu->Resize(emb_grad_gpu.dims());
       float* emb_grad_cpu_data = emb_grad_cpu->mutable_data<float>(pinned_place_);
       cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
-      sync_timer.Resume();
+      wait_timer.Resume();
       CUDACHECK(cudaMemcpyAsync(emb_grad_cpu_data, emb_grad_gpu_data, emb_grad_gpu.memory_size(),
             cudaMemcpyDeviceToHost, *copy_stream));
-      sync_timer.Pause();
     }
 #endif
 
@@ -600,9 +611,11 @@ void ExecutorThreadWorker::StartGPUCalc() {
     }
 
     if (sync_signal_) {
+      sync_timer.Resume();
       SyncParam();
       sync_signal_ = false;
       periodic_cnt = 0;
+      sync_timer.Pause();
     }
 
     ++step_cnt;
@@ -625,8 +638,10 @@ void ExecutorThreadWorker::StartGPUCalc() {
   main_net_stat_.main_net_trp = accum_num / main_timer.ElapsedSec();
   main_net_stat_.other_ratio = main_net_stat_.main_net_ratio - main_net_stat_.gpu_ratio;
   main_net_stat_.other_us = main_net_stat_.main_net_us - main_net_stat_.gpu_us;
-  main_net_stat_.sync_ratio = sync_timer.ElapsedSec() / outer_timer.ElapsedSec();
-  main_net_stat_.sync_us = sync_timer.ElapsedUS() / sync_timer.Count();
+  main_net_stat_.wait_ratio = wait_timer.ElapsedSec() / outer_timer.ElapsedSec();
+  main_net_stat_.wait_us = wait_timer.ElapsedUS() / wait_timer.Count();
+  main_net_stat_.sync_ratio = sync_timer.Count() ? (sync_timer.ElapsedSec() / outer_timer.ElapsedSec()) : 0;
+  main_net_stat_.sync_us = sync_timer.Count() ? (sync_timer.ElapsedUS() / sync_timer.Count()) : 0;
   main_net_stat_.throughput = accum_num / outer_timer.ElapsedSec();
 }
 
@@ -676,21 +691,25 @@ void ExecutorThreadWorker::TrainFiles() {
   for (int i = 0; i < nemb_bp_threads_; ++i) {
     emb_bp_stat.emb_bp_ratio += emb_bp_stats_[i].emb_bp_ratio / nemb_bp_threads_;
     emb_bp_stat.emb_bp_us += emb_bp_stats_[i].emb_bp_us / nemb_bp_threads_;
+    emb_bp_stat.wait_ratio += emb_bp_stats_[i].wait_ratio / nemb_bp_threads_;
+    emb_bp_stat.wait_us += emb_bp_stats_[i].wait_us / nemb_bp_threads_;
     emb_bp_stat.throughput += emb_bp_stats_[i].throughput;
   }
-  fprintf(stderr, "r%d_emb_bp_perf emb_bp:%.1f%%:%d trp:%d\n", rank_id_,
+  fprintf(stderr, "r%d_emb_bp_perf emb_bp:%.1f%%:%d wait:%.1f%%:%d trp:%d\n", rank_id_,
       emb_bp_stat.emb_bp_ratio * 100, static_cast<int>(emb_bp_stat.emb_bp_us),
+      emb_bp_stat.wait_ratio * 100, static_cast<int>(emb_bp_stat.wait_us),
       static_cast<int>(emb_bp_stat.throughput));
 
-  fprintf(stderr, "r%d_main_net_perf gpu:%.1f%%:%d sync:%.1f%%:%d main_net:%.1f%%:%d\n", rank_id_,
+  fprintf(stderr, "r%d_main_net_perf gpu:%.1f%%:%d wait:%.1f%%:%d sync:%.1f%%:%d main_net:%.1f%%:%d\n", rank_id_,
       main_net_stat_.gpu_ratio * 100, static_cast<int>(main_net_stat_.gpu_us),
+      main_net_stat_.wait_ratio * 100, static_cast<int>(main_net_stat_.wait_us),
       main_net_stat_.sync_ratio * 100, static_cast<int>(main_net_stat_.sync_us),
       main_net_stat_.main_net_ratio * 100, static_cast<int>(main_net_stat_.main_net_us));
   fprintf(stderr, "r%d_THROUGHPUT:%d\n", rank_id_, static_cast<int>(main_net_stat_.throughput));
 
-  //fprintf(stderr, "r%d_other_perf gpu_trp:%d main_net_trp:%d sync:%.1f%%:%.1f\n", rank_id_,
+  //fprintf(stderr, "r%d_other_perf gpu_trp:%d main_net_trp:%d wait:%.1f%%:%.1f\n", rank_id_,
   //    static_cast<int>(main_net_stat_.gpu_trp),
-  //    static_cast<int>(main_net_stat_.main_net_trp), main_net_stat_.sync_ratio, main_net_stat_.sync_us);
+  //    static_cast<int>(main_net_stat_.main_net_trp), main_net_stat_.wait_ratio, main_net_stat_.wait_us);
 
   for (Scope* scope : thread_scope_->kids()) {
     cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();

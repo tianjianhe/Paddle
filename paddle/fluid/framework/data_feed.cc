@@ -477,16 +477,24 @@ bool MultiSlotBinaryDataFeed::Preprocess(const std::string& filename) {
   fstat(fd_, &sb);
   end_ = static_cast<size_t>(sb.st_size);
 
-  buffer_ = reinterpret_cast<char*>(mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd_, 0));
-  if (buffer_ == MAP_FAILED) return false;
+  buffer_ = reinterpret_cast<char*>(mmap(NULL, end_, PROT_READ, MAP_PRIVATE, fd_, 0));
+  PADDLE_ENFORCE(buffer_ != MAP_FAILED, strerror(errno));
 
   offset_ = 0;
   return true;
 }
 
 bool MultiSlotBinaryDataFeed::Postprocess() {
-  // TODO: need we do munmap?
-  close(fd_);
+  if (buffer_ != nullptr) {
+    munmap(buffer_, end_);
+    buffer_ = nullptr;
+  }
+  if (fd_ != -1) {
+    close(fd_);
+    fd_ = -1;
+    end_ = 0;
+    offset_ = 0;
+  }
   return true;
 }
 

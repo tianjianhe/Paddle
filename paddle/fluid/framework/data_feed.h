@@ -296,9 +296,8 @@ class MultiSlotBinaryDataFeed
   virtual int Next() override;
 
  protected:
-  int fd_{0};
+  int fd_{-1};
   char* buffer_{nullptr};
-  size_t buffer_size_{0};
   size_t end_{0};
   size_t offset_{0};
 
