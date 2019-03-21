@@ -241,7 +241,7 @@ class MultiSlotType {
   void AppendValues(const float* input, size_t size) {
     CheckFloat();
     offset_.push_back(offset_.back() + size);
-    uint64_feasign_.insert(uint64_feasign_.end(), input, input + size);
+    float_feasign_.insert(float_feasign_.end(), input, input + size);
   }
   const std::vector<float>& GetFloatData() const { return float_feasign_; }
   const std::vector<uint64_t>& GetUint64Data() const { return uint64_feasign_; }

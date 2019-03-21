@@ -91,7 +91,7 @@ class ExecutorThreadWorker {
   void StartGPUCalc();
   //void AsyncUpdateParam();
   void SyncParam();
-  void LogFetchValues(const Scope& scope);
+  void LogFetchValues(Scope& scope);
 
  protected:
   int nranks_;

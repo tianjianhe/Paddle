@@ -226,7 +226,8 @@ void ExecutorThreadWorker::LookupTableGrad(Scope* scope) {
   const size_t voc_size = embedding->dims()[0];
   const int emb_size = embedding->dims()[1];
   //TODO
-  float lr = 0.01;//scope->FindVar("learning_rate_0")->Get<LoDTensor>().data<float>()[0];
+  //float lr = 0.01;
+  float lr = root_scope_->FindVar("learning_rate_0")->Get<LoDTensor>().data<float>()[0];
 
   for (size_t i = 0; i < ids_names_.size(); ++i) {
     LoDTensor* emb_grad_cpu = scope->Var(ids_names_[i] + "_emb_grad_cpu")->GetMutable<LoDTensor>();
@@ -302,11 +303,23 @@ void ExecutorThreadWorker::LookupTableSumConcat(Scope* scope) {
   float* user_concat_gpu_data = user_concat_gpu->mutable_data<float>(gpu_place_);
   float* news_concat_gpu_data = news_concat_gpu->mutable_data<float>(gpu_place_);
 
+  const LoDTensor& click_cpu = scope->FindVar("click")->Get<LoDTensor>();
+  const int64_t* click_cpu_data = reinterpret_cast<const int64_t*>(click_cpu.data<int64_t>());
+  int64_t *tmp = new int64_t[batch_size];
+  memcpy(tmp, click_cpu_data, batch_size * sizeof(int64_t));
+  LoDTensor* click_gpu = scope->FindVar("click")->GetMutable<LoDTensor>();
+  int64_t* click_gpu_data = click_gpu->mutable_data<int64_t>(gpu_place_);
+
+
+
   cudaStream_t* copy_stream = scope->FindVar("copy_stream")->GetMutable<cudaStream_t>();
   CUDACHECK(cudaMemcpyAsync(user_concat_gpu_data, user_concat_cpu_data,
         user_concat_cpu->memory_size(), cudaMemcpyHostToDevice, *copy_stream));
   CUDACHECK(cudaMemcpyAsync(news_concat_gpu_data, news_concat_cpu_data,
         news_concat_cpu->memory_size(), cudaMemcpyHostToDevice, *copy_stream));
+  CUDACHECK(cudaMemcpyAsync(click_gpu_data, tmp,
+        batch_size * sizeof(uint64_t), cudaMemcpyHostToDevice, *copy_stream));
+  delete []tmp;
 }
 
 void ExecutorThreadWorker::LookupTableSumConcatGrad(Scope* scope) {
@@ -316,7 +329,8 @@ void ExecutorThreadWorker::LookupTableSumConcatGrad(Scope* scope) {
   const size_t emb_size = embedding->dims()[1];
   const int batch_size = scope->FindVar(ids_names_[0])->Get<LoDTensor>().lod()[0].size() - 1;
   //TODO
-  float lr = 0.01;//scope->FindVar("learning_rate_0")->Get<LoDTensor>().data<float>()[0];
+  //float lr = 0.01;
+  float lr = *(root_scope_->FindVar("learning_rate_0")->Get<LoDTensor>().data<float>());
 
   float* user_concat_grad_cpu_data =
     scope->Var("user_concat_grad_cpu")->GetMutable<LoDTensor>()->mutable_data<float>(pinned_place_);
@@ -462,8 +476,9 @@ void ExecutorThreadWorker::StartEmbBPThreads() {
 #endif
 
         //if (step_cnt % 1000 == 0) {
-        //  LogFetchValues(*scope);
-        //}
+        if (step_cnt >= 0) {
+          LogFetchValues(*scope);
+        }
 
         scope_pool_->Send(scope);
         ++step_cnt;
@@ -645,11 +660,34 @@ void ExecutorThreadWorker::StartGPUCalc() {
   main_net_stat_.throughput = accum_num / outer_timer.ElapsedSec();
 }
 
-void ExecutorThreadWorker::LogFetchValues(const Scope& scope) {
+void ExecutorThreadWorker::LogFetchValues(Scope& scope) {
   // TODO: inspect loss temporarily
   for (auto& name : fetch_var_names_) {
-    float* data = scope.FindVar(name)->GetMutable<LoDTensor>()->mutable_data<float>(pinned_place_);
-    LOG(ERROR) << "r" << rank_id_ << "_loss: " << data[0];
+    const LoDTensor &loss_gpu = scope.FindVar(name)->Get<LoDTensor>();
+    const float* loss_gpu_data = loss_gpu.data<float>();
+
+    LoDTensor* loss_cpu = scope.Var(name+"cpu")->GetMutable<LoDTensor>();
+    loss_cpu->Resize(loss_gpu.dims());
+    float *loss_cpu_data = loss_cpu->mutable_data<float>(cpu_place_);
+    cudaMemcpy(loss_cpu_data, loss_gpu_data, loss_gpu.dims()[0]*sizeof(float), cudaMemcpyDeviceToHost);
+
+    //For infer temporary
+    //Note: fprintf may not be thread-safe
+    if (name.find("sigmoid") != std::string::npos){
+        FILE *out = fopen("pred.out", "a");
+        for (int i = 0; i<loss_gpu.dims()[0]; ++i)
+          fprintf(out, "%.4lf\n", loss_cpu_data[i]);
+        fclose(out);
+    }
+    if (name.find("cast") != std::string::npos){
+        FILE *out = fopen("label.out", "a");
+        for (int i = 0; i<loss_gpu.dims()[0]; ++i)
+          if (loss_cpu_data[i] > 0.5)
+            fprintf(out, "1\n");
+          else
+            fprintf(out,"0\n");
+        fclose(out);
+    }
   }
 }
 
@@ -669,6 +707,20 @@ void ExecutorThreadWorker::TrainFiles() {
   for (auto& t : all_threads_) {
     t.join();    
   }
+
+  auto& block = main_program_->Block(0);
+  for (auto& var : block.AllVars()) {
+    if (!var->Persistable()) continue;
+
+    const std::string var_name = var->Name();
+    auto *root_tensor = root_scope_->Var(var_name)->GetMutable<LoDTensor>();
+    auto& thread_tensor = thread_scope_->FindVar(var_name)->Get<LoDTensor>();
+    CUDACHECK(cudaMemcpy(root_tensor->mutable_data<float>(cpu_place_),
+      thread_tensor.data<float>(),
+      thread_tensor.numel() * sizeof(float),
+      cudaMemcpyDeviceToHost));
+  }
+
 
   EmbFFStat emb_ff_stat;
   for (int i = 0; i < nemb_ff_threads_; ++i) {
