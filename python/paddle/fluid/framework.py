@@ -2657,6 +2657,13 @@ class IrGraph(object):
             desc._set_attr(name, val)
 
 
+class ProgramSection(object):
+    def __init__(self):
+        self.program = Program()
+        self.input_set = set()
+        self.output_set = set()
+
+
 class Program(object):
     """
     Python Program. Beneath it is a ProgramDesc, which is used for
@@ -2719,6 +2726,7 @@ class Program(object):
         # fleet_opt will be given a value
         self._fleet_opt = None
         self._program_config = None
+        self.split_programs = []
 
     @property
     def _is_mem_optimized(self):

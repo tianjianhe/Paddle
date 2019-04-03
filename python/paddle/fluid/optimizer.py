@@ -17,13 +17,13 @@ from __future__ import print_function
 from collections import defaultdict
 from .wrapped_decorator import signature_safe_contextmanager
 
-from paddle.fluid.framework import Program, Variable, name_scope, default_main_program, default_startup_program
+from paddle.fluid.framework import Program, Variable, name_scope, default_main_program, default_startup_program, ProgramSection
 from paddle.fluid.distribute_lookup_table import find_distributed_lookup_table
 
 from . import framework
 from . import layers
 from . import unique_name
-from .backward import append_backward
+from .backward import append_backward, _some_in_set_
 from .clip import append_gradient_clip_ops, error_clip_callback
 from .framework import program_guard
 from .initializer import Constant
@@ -1980,3 +1980,155 @@ class ModelAverage(Optimizer):
         """Restore parameter values of current model.
         """
         executor.run(self.restore_program)
+
+class PipeOptimizer(object):
+    def __init__(self, optimizer):
+        self._optimizer = optimizer
+
+    def create_vars(self, block, main_program):
+        used_var_set = set()
+        for op_idx in range(block.desc.op_size()):
+            op_desc = block.desc.op(op_idx)
+            new_vars = set()
+            vars = op_desc.input_arg_names() + op_desc.output_arg_names()
+            for var in vars:
+                #print("var:" + str(var))
+                if var in used_var_set:
+                    continue
+                used_var_set.add(var)
+                #if block.desc.has_var_recursive(cpt.to_bytes(var)) or var == core.empty_var_name():#copy from append_backward_vars
+                    #continue
+                source_var = main_program.block(0).var(str(var))
+                block._clone_variable(source_var, False)
+            """
+            for var in block.vars:
+                print("block var:"+str(var))
+            op_desc.infer_var_type(block.desc)
+            op_desc.infer_shape(block.desc)
+            for var in vars:
+                if var in new_vars:
+                    _infer_var_data_type_(var, block)
+            """
+
+    def split_ops(self, ops, cut_point_name):
+        """
+        forward
+        """
+        output_names = set([cut_point_name])
+        relevant_op_flags = [True] * len(ops)
+        for i, op in reversed(list(enumerate(ops))):
+            if _some_in_set_(op.desc.output_arg_names(), output_names):
+                for name in op.desc.input_arg_names():
+                    output_names.add(name)
+            else:
+                relevant_op_flags[i] = False
+
+        op_path = [
+            ops[i] for i in range(len(ops)) if relevant_op_flags[i]
+        ]
+        return op_path
+
+    def split_ops_backward(self, ops, cut_point_name):
+        """
+        backward
+        """
+        input_names = set([cut_point_name])
+        relevant_op_flags = [True] * len(ops)
+        for i, op in list(enumerate(ops)):
+            if _some_in_set_(op.desc.input_arg_names(), input_names):
+                for name in op.desc.output_arg_names():
+                    input_names.add(name)
+            elif _some_in_set_(op.desc.output_arg_names(), input_names) and len(op.desc.input_arg_names())==0:
+                for name in op.desc.output_arg_names():
+                    input_names.add(name)
+            else:
+                relevant_op_flags[i] = False
+
+        op_path = [
+            ops[i] for i in range(len(ops)) if relevant_op_flags[i]
+        ]
+        return op_path
+
+    def find_input_output(self, ops, name, is_forward=True):
+        """
+        The result for the bp part maybe wrong due to the optimization op, but it doesn't matter for our purpose. 
+        Correct me if i am wrong.
+        """
+        all_set = set([name])
+        part_set = set()
+        for op in ops:
+            if is_forward:
+                part_set.update(op.desc.output_arg_names())
+            else:
+                part_set.update(op.desc.input_arg_names())
+            all_set.update(op.desc.output_arg_names())
+            all_set.update(op.desc.input_arg_names())
+        #print("all_set:" + str(all_set))
+        #print("part_set:" + str(part_set))
+        return all_set - part_set
+
+    def split_program(self, main_program, joint_list):
+        """
+        Split a program by the joint node in 'joint_list'
+        Don't cover all cases now
+        """
+        programs = []
+        backward_programs = []
+        block = main_program.block(0)
+        used_op_set = set()
+        #for i, op in enumerate(block.ops):
+            #print(str(i) +":" + str(op.desc.input_arg_names()) + " " + str(op.desc.output_arg_names())) 
+        for i, cut_vars in enumerate(joint_list):
+            is_last = i == len(joint_list)-1
+            program = ProgramSection()
+            backward_program = ProgramSection()
+            cur_used_op_set = set()
+            for cut_var in cut_vars:
+                cur_ops = self.split_ops(block.ops, cut_var.name)
+                #if _some_in_set_(cur_ops, list(cur_used_op_set)):
+                cur_ops = [op for op in cur_ops if op not in used_op_set]
+                if len(set(cur_ops) & cur_used_op_set) > 0:
+                    print("error: the cut point in one level has comment child")
+                cur_used_op_set.update(cur_ops)
+
+                op_descs = [op.desc for op in cur_ops]
+                for op_desc in op_descs:
+                    ap_op = program.program.block(0).desc.append_op()
+                    ap_op.copy_from(op_desc)
+                program.input_set.update(self.find_input_output(cur_ops, cut_var.name, True))
+                if not is_last:
+                    program.output_set.add(cut_var.name)
+
+                #deal with the backward part
+                b_program = backward_program
+                if is_last:
+                    b_program = program
+                cur_back_ops = self.split_ops_backward(block.ops, cut_var.name+"@GRAD")
+                cur_back_ops = [op for op in cur_back_ops if op not in used_op_set]
+                cur_used_op_set.update(cur_back_ops)
+                op_descs = [op.desc for op in cur_back_ops]
+                for op_desc in op_descs:
+                    ap_op = b_program.program.block(0).desc.append_op()
+                    ap_op.copy_from(op_desc)
+                if not is_last:
+                    b_program.input_set.add(cut_var.name+"@GRAD")
+                b_program.output_set.update(self.find_input_output(cur_back_ops, cut_var.name+"@GRAD", False))
+                
+            used_op_set.update(cur_used_op_set)
+            programs.append(program)
+            if not is_last:
+                backward_programs.append(backward_program)
+        return programs + list(reversed(backward_programs))
+
+    def minimize(self,
+                 loss,
+                 startup_program=None,
+                 parameter_list=None,
+                 no_grad_set=None,
+                 joint_list=None):
+        self._optimizer.minimize(loss, startup_program, parameter_list, no_grad_set)
+        program = loss.block.program
+        program_list = self.split_program(program, joint_list+[[loss]])
+        for p in program_list:
+            self.create_vars(p.program.block(0), program)
+        program.split_programs = program_list
