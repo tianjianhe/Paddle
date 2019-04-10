@@ -21,6 +21,13 @@ void DeviceWorker::SetRootScope(Scope* root_scope) { root_scope_ = root_scope; }
 
 void DeviceWorker::SetDataFeed(const std::shared_ptr<DataFeed>& data_feed) {
   device_reader_ = data_feed;
+  device_readers_.clear();
+  device_readers_.push_back(device_reader_);
+}
+
+void DeviceWorker::SetDataFeed(std::vector<std::shared_ptr<DataFeed>>::iterator begin,
+    size_t num) {
+  device_readers_.assign(begin, begin + num);
 }
 
 }  // namespace framework

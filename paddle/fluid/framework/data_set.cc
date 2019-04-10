@@ -88,8 +88,8 @@ void DatasetImpl<T>::SetHdfsConfig(const std::string& fs_name,
 
 template <typename T>
 void DatasetImpl<T>::SetDataFeedDesc(const std::string& data_feed_desc_str) {
-  google::protobuf::TextFormat::ParseFromString(data_feed_desc_str,
-                                                &data_feed_desc_);
+  bool success = data_feed_desc_.ParseFromString(data_feed_desc_str);
+  PADDLE_ENFORCE(success, "Fail to parse DataFeedDesc from string:\n%s", data_feed_desc_str.c_str());
 }
 
 // readers_.size() may not be equal to thread_num_,

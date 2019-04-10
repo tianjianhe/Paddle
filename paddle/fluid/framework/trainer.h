@@ -42,6 +42,9 @@ class TrainerBase {
   // model memory are hosted in root_scope
   void SetScope(Scope* root_scope);
   void SetDebug(const bool debug) { debug_ = debug; }
+  // FIXME: As dataset_ptr is assigned only in Initialize method and we do input dataset argument,
+  // it does not have to expose the setting method to public, which will make it confuse that
+  // the dataset is changable after initialization.
   void SetDataset(Dataset* dataset_ptr) { dataset_ptr_ = dataset_ptr; }
   virtual void Initialize(const TrainerDesc& trainer_desc,
                           Dataset* data_set) = 0;
@@ -64,17 +67,16 @@ class MultiTrainer : public TrainerBase {
  public:
   MultiTrainer() {}
   virtual ~MultiTrainer() {}
-  virtual void Initialize(const TrainerDesc& trainer_desc, Dataset* data_set);
+  virtual void Initialize(const TrainerDesc& trainer_desc, Dataset* data_set) override;
   virtual void InitTrainerEnv(const ProgramDesc& main_program,
-                              const platform::Place& place);
-  virtual void InitOtherEnv(const ProgramDesc& main_program) {}
+                              const platform::Place& place) override;
+  virtual void InitOtherEnv(const ProgramDesc& main_program) override {}
   virtual void Run();
   virtual void Finalize();
 
  protected:
   int thread_num_;
   std::vector<std::thread> threads_;
-  std::vector<std::shared_ptr<DataFeed>> readers_;
   std::vector<std::shared_ptr<DeviceWorker>> workers_;
 };
 

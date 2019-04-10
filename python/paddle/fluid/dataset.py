@@ -36,7 +36,7 @@ class DatasetFactory(object):
 
     def create_dataset(self, datafeed_class="QueueDataset"):
         """
-        Create "QueueDataset" or "InMemoryDataset",
+        Create "QueueDataset" or "InMemoryDataset" or "FileInstantDataset",
         the default is "QueueDataset".
 
         Examples:
@@ -176,7 +176,7 @@ class DatasetBase(object):
         Returns:
             A string message
         """
-        return text_format.MessageToString(self.proto_desc)
+        return self.proto_desc.SerializeToString()
 
 
 class InMemoryDataset(DatasetBase):
@@ -291,4 +291,39 @@ class QueueDataset(DatasetBase):
         """
         raise NotImplementedError(
             "QueueDataset does not support global shuffle, "
+            "please use InMemoryDataset for global_shuffle")
+
+
+class FileInstantDataset(DatasetBase):
+    """
+    FileInstantDataset, it will process data streamly.
+
+    Example:
+        import paddle.fluid as fluid
+        dataset = fluid.DatasetFactory.create_dataset("FileInstantDataset")
+    """
+
+    def __init__(self):
+        """
+        Init
+        """
+        super(FileInstantDataset, self).__init__()
+        self.proto_desc.name = "MultiSlotFileInstantDataFeed"
+
+    def local_shuffle(self):
+        """
+        Local shuffle
+
+        FileInstantDataset does not support local shuffle
+        """
+        raise NotImplementedError(
+            "FileInstantDataset does not support local shuffle, "
+            "please use InMemoryDataset for local_shuffle")
+
+    def global_shuffle(self, fleet=None):
+        """
+        Global shuffle
+        """
+        raise NotImplementedError(
+            "FileInstantDataset does not support global shuffle, "
             "please use InMemoryDataset for global_shuffle")

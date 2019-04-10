@@ -24,6 +24,7 @@ from . import core
 from . import compiler
 from .. import compat as cpt
 from .trainer_factory import TrainerFactory
+import paddle
 
 __all__ = ['Executor', 'global_scope', 'scope_guard']
 
@@ -637,11 +638,16 @@ class Executor(object):
         assert len(fetch_list) == len(fetch_info)
         compiled = isinstance(program, compiler.CompiledProgram)
         if not compiled:
-            trainer = TrainerFactory()._create_trainer(program._fleet_opt)
+            if program._pipeline_opt:
+                trainer = TrainerFactory()._create_trainer(program._pipeline_opt)
+            else:
+                trainer = TrainerFactory()._create_trainer(program._fleet_opt)
             trainer._set_program(program)
         else:
-            trainer = TrainerFactory()._create_trainer(
-                program.program._fleet_opt)
+            if program._pipeline_opt:
+                trainer = TrainerFactory()._create_trainer(program.program._pipeline_opt)
+            else:
+                trainer = TrainerFactory()._create_trainer(program.program._fleet_opt)
             trainer._set_program(program.program)
         if thread <= 0:
             if dataset.thread_num <= 0:

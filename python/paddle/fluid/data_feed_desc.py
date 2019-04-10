@@ -150,4 +150,4 @@ class DataFeedDesc(object):
         Returns:
             A string message
         """
-        return text_format.MessageToString(self.proto_desc)
+        return self.proto_desc.SerializeToString()

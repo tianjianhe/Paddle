@@ -13,7 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 syntax = "proto2";
+option optimize_for = LITE_RUNTIME;
 import "data_feed.proto";
+import "framework.proto";
 package paddle.framework;
 
 message TrainerDesc {
@@ -35,6 +37,7 @@ message TrainerDesc {
   optional HogwildWorkerParameter hogwild_param = 101;
   optional DownpourWorkerParameter downpour_param = 103;
   optional PullDenseWorkerParameter pull_dense_param = 102;
+  optional PipelineWorkerParameter pipeline_param = 104;
   // datafeed desc
   optional DataFeedDesc data_desc = 201;
 }
@@ -48,6 +51,30 @@ message DownpourWorkerParameter {
   repeated ProgramConfig program_config = 4;
   optional bool push_sparse = 5 [ default = true ];
   optional bool push_dense = 6 [ default = true ];
+}
+
+message PipelineWorkerParameter {
+  repeated PipeSectionConfig pipe_sec_cfg = 1;
+
+  optional int32 reader_num = 2 [ default = 1 ];
+  optional int32 context_scope_num = 3 [ default = 1 ];
+  optional int32 nasync_steps = 4 [ default = 0 ];
+}
+
+message PipeSectionConfig {
+  enum Place {
+    CPUPlace = 0;
+    CUDAPlace = 1;
+    CUDAPinnedPlace = 2;
+  }
+
+  // FIXME: How to use proto::ProgramDesc
+  //required string program_desc_str = 1;
+  optional proto.ProgramDesc program_desc = 1;
+  optional Place place = 2;
+  optional int32 concurrency = 3 [ default = 1 ];
+  repeated string joint_in_var_names = 4;
+  repeated string joint_out_var_names = 5;
 }
 
 message FetchConfig {

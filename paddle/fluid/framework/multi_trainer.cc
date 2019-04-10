@@ -24,23 +24,31 @@ namespace framework {
 void MultiTrainer::Initialize(const TrainerDesc& trainer_desc,
                               Dataset* dataset) {
   thread_num_ = trainer_desc.thread_num();
-  SetDataset(dataset);
+  dataset_ptr_ = dataset;
   // get filelist from trainer_desc here
   dataset->CreateReaders();
   VLOG(3) << "readers created";
-  const std::vector<std::shared_ptr<paddle::framework::DataFeed>> readers =
-      dataset->GetReaders();
+  std::vector<std::shared_ptr<paddle::framework::DataFeed>> readers = dataset->GetReaders();
   VLOG(3) << "readers num: " << readers.size();
-  // change thread num to readers num
-  thread_num_ = readers.size();
+  if (static_cast<size_t>(thread_num_) > readers.size()) {
+    // change thread num to readers num
+    thread_num_ = readers.size();
+  }
+  int nreaders_each = readers.size() / thread_num_;
   VLOG(3) << "worker thread num: " << thread_num_;
   workers_.resize(thread_num_);
   for (int i = 0; i < thread_num_; ++i) {
     workers_[i] = DeviceWorkerFactory::CreateDeviceWorker(
         trainer_desc.device_worker_name());
-    workers_[i]->Initialize(trainer_desc);
     workers_[i]->SetDeviceIndex(i);
-    workers_[i]->SetDataFeed(readers[i]);
+    workers_[i]->SetDeviceNum(thread_num_);
+    if (nreaders_each == 1) {
+      workers_[i]->SetDataFeed(readers[i]);
+    } else {
+      workers_[i]->SetDataFeed(readers.begin() + nreaders_each * i, nreaders_each);
+    }
+
+    workers_[i]->Initialize(trainer_desc);
   }
 
   // set debug here

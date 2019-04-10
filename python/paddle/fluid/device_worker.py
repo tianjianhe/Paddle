@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__all__ = ['DeviceWorker', 'Hogwild', 'DownpourSGD']
+__all__ = ['DeviceWorker', 'Hogwild', 'DownpourSGD', 'Pipeline']
 
 
 class DeviceWorker(object):
@@ -173,6 +173,54 @@ class DownpourSGD(DeviceWorker):
         if self._infer:
             downpour.push_dense = False
             downpour.push_sparse = False
+
+
+class Pipeline(DeviceWorker):
+    """
+    PipelineWorker
+
+    """
+
+    def __init__(self):
+        """
+        Init.
+        """
+        super(Pipeline, self).__init__()
+
+    def _gen_worker_desc(self, trainer_desc):
+        """
+        Generator worker desc, which device worker is PipelineWorker.
+
+        Args:
+            trainer_desc(TrainerDesc): a TrainerDesc object
+        """
+        from google.protobuf import text_format
+        from . import core
+        trainer_desc.device_worker_name = "PipelineWorker"
+        pipeline_opt = self.program_._pipeline_opt
+        pipeline_param = trainer_desc.pipeline_param
+        pipeline_param.context_scope_num = pipeline_opt["context_scope_num"]
+        pipeline_param.nasync_steps = pipeline_opt["nasync_steps"]
+        for i, program in enumerate(pipeline_opt["section_program"]):
+            cfg = pipeline_param.pipe_sec_cfg.add();
+            cfg.program_desc.ParseFromString(program.program._get_desc().serialize_to_string())
+            # TODO: why does not work
+            #cfg.program_desc.CopyFrom(program.program._get_desc())
+            place = pipeline_opt['section_place'][i]
+            if isinstance(place, core.CPUPlace):
+                cfg.place = cfg.CPUPlace
+            elif isinstance(place, core.CUDAPlace):
+                cfg.place = cfg.CUDAPlace
+            elif isinstance(place, core.CUDAPinnedPlace):
+                cfg.place = cfg.CUDAPinnedPlace
+            else:
+                raise NotImplementedError()
+
+            cfg.concurrency = pipeline_opt['section_concurrency'][i]
+            for var in program.input_set:
+                cfg.joint_in_var_names.append(var)
+            for var in program.output_set:
+                cfg.joint_out_var_names.append(var)
 
 
 class DeviceWorkerFactory(object):

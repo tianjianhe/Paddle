@@ -42,7 +42,7 @@ __all__ = [
     'SGDOptimizer', 'MomentumOptimizer', 'AdagradOptimizer', 'AdamOptimizer',
     'AdamaxOptimizer', 'DecayedAdagradOptimizer', 'RMSPropOptimizer',
     'FtrlOptimizer', 'Adadelta', 'ModelAverage', 'LarsMomentum',
-    'LarsMomentumOptimizer', 'DGCMomentumOptimizer'
+    'LarsMomentumOptimizer', 'DGCMomentumOptimizer', 'PipelineOptimizer',
 ]
 
 
@@ -1992,9 +1992,24 @@ class ModelAverage(Optimizer):
         """
         executor.run(self.restore_program)
 
-class PipeOptimizer(object):
-    def __init__(self, optimizer):
+class PipelineOptimizer(object):
+    def __init__(self, optimizer,
+            section_joint=None,
+            section_place=None,
+            section_concurrency=None,
+            context_scope_num=20,
+            nasync_steps=1):
+        # TODO: check properties
         self._optimizer = optimizer
+        self._section_joint = section_joint
+        self._section_place = section_place
+        self._section_concurrency = section_concurrency
+        self._context_scope_num = context_scope_num
+        self._nasync_steps = nasync_steps
+
+    def reader_num_each(self):
+        # all readers are in the 1st section
+        return self._section_concurrency[0]
 
     def create_vars(self, block, main_program):
         used_var_set = set()
@@ -2135,11 +2150,18 @@ class PipeOptimizer(object):
                  loss,
                  startup_program=None,
                  parameter_list=None,
-                 no_grad_set=None,
-                 joint_list=None):
+                 no_grad_set=None):
         self._optimizer.minimize(loss, startup_program, parameter_list, no_grad_set)
         program = loss.block.program
-        program_list = self.split_program(program, joint_list+[[loss]])
+        program_list = self.split_program(program, self._section_joint)
         for p in program_list:
             self.create_vars(p.program.block(0), program)
-        program.split_programs = program_list
+        program._pipeline_opt = {
+                "trainer": "MultiTrainer",
+                "device_worker": "Pipeline",
+                "section_program": program_list,
+                "section_place": self._section_place + self._section_place[-2::-1],
+                "section_concurrency": self._section_concurrency + self._section_concurrency[-2::-1],
+                "context_scope_num": self._context_scope_num,
+                "nasync_steps": self._nasync_steps
+                }

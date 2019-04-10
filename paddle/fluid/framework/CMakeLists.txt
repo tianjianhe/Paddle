@@ -186,7 +186,7 @@ else()
   cc_library(executor SRCS executor.cc multi_trainer.cc dataset_factory.cc
   dist_multi_trainer.cc trainer_factory.cc trainer.cc data_feed_factory.cc
   data_feed.cc device_worker.cc hogwild_worker.cc downpour_worker.cc
-  pull_dense_worker.cc device_worker_factory.cc data_set.cc DEPS op_registry
+  pull_dense_worker.cc pipeline_worker.cc device_worker_factory.cc data_set.cc DEPS op_registry
   device_context scope framework_proto data_feed_proto trainer_desc_proto glog
   lod_rank_table fs shell fleet_wrapper lodtensor_printer feed_fetch_method
   graph_to_program_pass variable_helper ${NGRAPH_EXE_DEPS} timer data_feed_proto)
@@ -203,8 +203,8 @@ cc_library(parallel_executor SRCS parallel_executor.cc DEPS
 cc_library(async_executor SRCS async_executor.cc data_feed.cc data_feed_factory.cc
            executor_thread_worker.cc multi_trainer.cc dist_multi_trainer.cc
            trainer_factory.cc trainer.cc device_worker.cc hogwild_worker.cc
-           downpour_worker.cc pull_dense_worker.cc device_worker_factory.cc
-           data_set.cc dataset_factory.cc
+           downpour_worker.cc pull_dense_worker.cc pipeline_worker.cc
+           device_worker_factory.cc data_set.cc dataset_factory.cc
            DEPS op_registry device_context scope framework_proto
            trainer_desc_proto glog lod_rank_table fleet_wrapper lodtensor_printer
            feed_fetch_method graph_to_program_pass data_feed_proto

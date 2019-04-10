@@ -265,7 +265,7 @@ class AsyncExecutor(object):
             raise ValueError(
                 'instance is None, please run config_distributed_nodes init instance'
             )
-        self.dist_desc_str = text_format.MessageToString(dist_desc)
+        self.dist_desc_str = dist_desc.SerializeToString()
         self.dist_desc = dist_desc
         self.executor.init_server(self.dist_desc_str, self.instance._rankid)
         ip = self.executor.start_server()
@@ -289,7 +289,7 @@ class AsyncExecutor(object):
                 'instance is None, please run config_distributed_nodes init instance'
             )
 
-        self.dist_desc_str = text_format.MessageToString(dist_desc)
+        self.dist_desc_str = dist_desc.SerializeToString()
         self.dist_desc = dist_desc
         place = core.CPUPlace()
         executor = Executor(place)

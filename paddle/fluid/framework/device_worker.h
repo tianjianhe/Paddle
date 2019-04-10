@@ -34,6 +34,7 @@ limitations under the License. */
 #include "paddle/fluid/platform/place.h"
 #include "paddle/fluid/platform/port.h"
 #include "paddle/fluid/platform/timer.h"
+#include "paddle/fluid/platform/nccl_helper.h"
 
 namespace paddle {
 namespace framework {
@@ -94,8 +95,11 @@ class DeviceWorker {
  public:
   DeviceWorker() {}
   virtual ~DeviceWorker() {}
+  // OPTIMIZE: it is better to initialize with configs like DeviceWorkerDesc
+  // to decouple with Trainer
   virtual void Initialize(const TrainerDesc& desc) = 0;
   virtual void SetDeviceIndex(int tid) = 0;
+  virtual void SetDeviceNum(int device_num) = 0;
   virtual void TrainFiles() = 0;
   virtual void PrintFetchVars() = 0;
   virtual void TrainFilesWithProfiler() = 0;
@@ -104,6 +108,8 @@ class DeviceWorker {
   virtual void BindingDataFeedMemory() = 0;
   virtual void SetRootScope(Scope* root_scope);
   virtual void SetDataFeed(const std::shared_ptr<DataFeed>& data_feed);
+  // The device worker may reserve multiple readers
+  virtual void SetDataFeed(std::vector<std::shared_ptr<DataFeed>>::iterator begin, size_t num);
   virtual void SetPlace(const paddle::platform::Place& place) {
     place_ = place;
   }
@@ -112,6 +118,7 @@ class DeviceWorker {
   Scope* root_scope_;
   paddle::platform::Place place_;
   std::shared_ptr<DataFeed> device_reader_;
+  std::vector<std::shared_ptr<DataFeed>> device_readers_;
   int64_t batch_num_;
   FetchConfig fetch_config_;
 };
@@ -121,6 +128,7 @@ class CPUWorkerBase : public DeviceWorker {
   CPUWorkerBase() {}
   virtual ~CPUWorkerBase() {}
   virtual void SetDeviceIndex(int tid) { thread_id_ = tid; }
+  virtual void SetDeviceNum(int device_num) { thread_num_ = device_num; };
   virtual void TrainFiles() = 0;
   virtual void TrainFilesWithProfiler() {}
   virtual void PrintFetchVars() {}
@@ -128,6 +136,7 @@ class CPUWorkerBase : public DeviceWorker {
 
  protected:
   int thread_id_;
+  int thread_num_;
 };
 
 class HogwildWorker : public CPUWorkerBase {
@@ -192,6 +201,186 @@ class DownpourWorker : public HogwildWorker {
   std::shared_ptr<PullDenseWorker> _pull_dense_worker;
   std::vector<::std::future<int32_t>> push_sparse_status_;
   std::vector<::std::future<int32_t>> push_dense_status_;
+};
+
+using PipeJoint = operators::reader::BlockingQueue<Scope*>;
+
+class PipelineFunctor {
+ public:
+  PipelineFunctor() {}
+  virtual ~PipelineFunctor() {}
+
+  virtual int operator()(Scope* scope, int index) = 0;
+};
+
+class ReadFunctor : public PipelineFunctor {
+ public:
+  ReadFunctor(const std::vector<std::shared_ptr<DataFeed>>& readers) {
+    readers_ = readers;
+  }
+  virtual ~ReadFunctor() {}
+
+  int operator()(Scope* scope, int index) override;
+
+ protected:
+  std::vector<std::shared_ptr<DataFeed>> readers_;
+
+};
+
+class SynchronizeFunctor : public PipelineFunctor {
+ public:
+  SynchronizeFunctor(int rank_id, int rank_num, int nasync_steps);
+  virtual ~SynchronizeFunctor() {}
+
+  void SetSyncParamNames(const std::vector<std::string>& param_names) {
+    sync_param_names_ = param_names;
+  }
+
+  int operator()(Scope* scope, int index) override;
+
+ protected:
+  static std::unique_ptr<platform::NCCLContextMap> nccl_ctx_map_;
+  //static std::unique_ptr<ncclUniqueId> nccl_id_;
+
+  uint64_t sync_signal_;
+
+  const int kRankId;
+  const int kNRanks;
+
+  const int kNAsyncSteps;
+
+  static uint64_t s_sync_flag_;
+
+  int counter_;
+
+  std::vector<std::string> sync_param_names_;
+  std::vector<Scope*>	pipeline_scopes_;
+
+  void Synchronize();
+
+};
+
+class PipeSection {
+ public:
+  explicit PipeSection(const PipeSectionConfig& cfg, int rank_id);
+  ~PipeSection() {}
+
+  const platform::Place& place() const { return place_; }
+
+  int sec_index() const { return sec_index_; }
+  void SetSectionIndex(int index) { sec_index_ = index;	}
+
+  int sec_num() const { return sec_num_; }
+  void SetSectionNum(int sec_num) { sec_num_ = sec_num;	}
+
+  const PipeSection* pre() const { return pre_; }
+  void SetPrePipeSection(PipeSection* sec) { pre_ = sec; }
+
+  const PipeSection* next() const { return next_; }
+  void SetNextPipeSection(PipeSection* sec) { next_ = sec; }
+
+  void SetJoint(PipeJoint* joint_in, PipeJoint* joint_out) {
+    joint_in_ = joint_in;
+    joint_out_ = joint_out;
+  }
+
+  void SetReadFunctor(PipelineFunctor* read_func) {
+    read_func_ = read_func;
+  }
+
+  void SetSynchronizeFunctor(PipelineFunctor* sync_func) {
+    sync_func_ = sync_func;
+  }
+
+  void Start(std::vector<std::thread>* pipe_threads);
+
+  void CopyParameters(const Scope& root_scope, Scope* pipeline_scope);
+
+  void CreateOperators();
+
+  void RetrieveSyncParamNames(std::vector<std::string>* param_vars);
+
+ protected:
+  const int kRankId;
+
+	int sec_index_;
+  int sec_num_;
+
+  PipeSection* pre_;
+  PipeSection* next_;
+
+  PipelineFunctor* read_func_;
+  PipelineFunctor* sync_func_;
+
+  std::shared_ptr<framework::ProgramDesc> program_;
+
+	platform::Place place_;
+	platform::DeviceContext* dev_ctx_;
+
+  int concurrency_;
+
+  PipeJoint* joint_in_;
+  PipeJoint* joint_out_;
+
+  std::vector<std::string> joint_in_var_names_;
+  std::vector<std::string> joint_out_var_names_;
+  std::vector<std::string> param_names_;
+
+  int concurrency_monitor_;
+  std::mutex concurrency_mutex_;
+
+  std::vector<std::unique_ptr<OperatorBase>> ops_;
+
+  void Postprocess(Scope* scope);
+
+  void AutoSetCPUAffinity(bool reuse = true);
+
+};
+
+class PipelineWorker : public DeviceWorker {
+ public:
+  PipelineWorker() {}
+  virtual ~PipelineWorker() {}
+
+  virtual void SetDeviceIndex(int tid) { rank_id_ = tid; }
+  virtual void SetDeviceNum(int device_num) { nranks_ = device_num; }
+
+  virtual void Initialize(const TrainerDesc& desc) override;
+
+  virtual void CreateDeviceResource(const ProgramDesc& main_prog) override;
+
+  virtual void BindingDataFeedMemory() override {}
+
+  virtual void TrainFiles() override;
+  virtual void TrainFilesWithProfiler() override {}
+
+  virtual void PrintFetchVars() override {};
+
+ protected:
+  int nscopes_;
+
+  int nranks_;
+  int rank_id_;
+
+  int nasync_steps_;
+
+  std::unique_ptr<PipelineFunctor> read_func_;
+  std::unique_ptr<PipelineFunctor> sync_func_;
+
+  std::unique_ptr<framework::ProgramDesc> main_program_;
+
+  Scope* pipeline_scope_;
+
+	std::vector<std::unique_ptr<PipeSection>> sections_;
+
+  std::vector<std::unique_ptr<PipeJoint>> joints_;
+
+  std::vector<std::thread> pipe_threads_;
+
+  virtual void InitScopePool(PipeJoint* scope_pool);
+
+  virtual void InitPipelineInner() {};
+
 };
 
 }  // namespace framework
