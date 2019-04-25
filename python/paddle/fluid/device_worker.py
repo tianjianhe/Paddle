@@ -197,7 +197,7 @@ class Pipeline(DeviceWorker):
         from google.protobuf import text_format
         from . import core
         trainer_desc.device_worker_name = "PipelineWorker"
-        pipeline_opt = self.program_._pipeline_opt
+        pipeline_opt = self._program._pipeline_opt
         pipeline_param = trainer_desc.pipeline_param
         pipeline_param.context_scope_num = pipeline_opt["context_scope_num"]
         pipeline_param.nasync_steps = pipeline_opt["nasync_steps"]

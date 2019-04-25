@@ -23,6 +23,7 @@ limitations under the License. */
 #include "paddle/fluid/platform/lodtensor_printer.h"
 #include "paddle/fluid/platform/device_context.h"
 
+//#define DEBUG
 //#define PIPELINE_PROFILE
 
 #ifdef PIPELINE_PROFILE
@@ -46,12 +47,16 @@ namespace paddle {
 namespace framework {
 
 std::unique_ptr<platform::NCCLContextMap> SynchronizeFunctor::nccl_ctx_map_ = nullptr;
+std::vector<Scope*>	SynchronizeFunctor::pipeline_scopes_;
 //std::unique_ptr<ncclUniqueId> SynchronizeFunctor::nccl_id_ = nullptr;
 //
 uint64_t SynchronizeFunctor::s_sync_flag_ = 0;
 
 int ReadFunctor::operator()(Scope* scope, int index) {
   // TODO: readers in a queue need to be compared
+  if (index >= readers_.size()) {
+    return -1;
+  }
   readers_[index]->AssignFeedVar(*scope);
   return readers_[index]->Next();
 }
@@ -75,6 +80,14 @@ SynchronizeFunctor::SynchronizeFunctor(int rank_id, int rank_num, int nasync_ste
     }
     mutex.unlock();
   }
+  if (pipeline_scopes_.empty()) {
+    static std::mutex pmutex;
+    pmutex.lock();
+    if (pipeline_scopes_.empty()) {
+      pipeline_scopes_.resize(kNRanks);
+    }
+    pmutex.unlock();
+  }
 
   counter_ = 0;
   sync_signal_ = 0;
@@ -90,10 +103,12 @@ int SynchronizeFunctor::operator()(Scope* scope, int index) {
     return 0;
   }
 
+  printf("htj in SynchronizeFunctor: %d, rankid: %d\n", __LINE__, kRankId);
   if (counter_ == kNAsyncSteps) {
-    reinterpret_cast<uint8_t*>(s_sync_flag_)[kRankId] = 0xFF;
+    reinterpret_cast<uint8_t*>(&s_sync_flag_)[kRankId] = 0xFF;
   }
 
+  printf("htj in SynchronizeFunctor: %d, rankid: %d\n", __LINE__, kRankId);
   if (s_sync_flag_ == sync_signal_) {
     static std::mutex mutex;
     if (mutex.try_lock()) {
@@ -104,6 +119,7 @@ int SynchronizeFunctor::operator()(Scope* scope, int index) {
       mutex.unlock();
     }
   }
+  printf("htj in SynchronizeFunctor: %d, rankid: %d\n", __LINE__, kRankId);
 
   if (s_sync_flag_ == 0) {
     counter_ = 0;
@@ -113,16 +129,20 @@ int SynchronizeFunctor::operator()(Scope* scope, int index) {
 }
 
 void SynchronizeFunctor::Synchronize() {
+  printf("htj in Synchronize\n");
   for (const std::string& name : sync_param_names_) {
+      printf("htj in Synchronize: var name: %s\n", name.c_str());
+    platform::NCCLGroupGuard guard;
     for (int i = 0; i < kNRanks; ++i) {
-      platform::NCCLGroupGuard guard;
+      //platform::NCCLGroupGuard guard;
       const platform::NCCLContext& nccl_ctx = nccl_ctx_map_->at(i);
       LoDTensor* tensor = pipeline_scopes_[i]->FindVar(name)->GetMutable<LoDTensor>();
       // FIXME: do not depend on data type explicitly
       float* data = tensor->mutable_data<float>(nccl_ctx_map_->DevCtx(i)->GetPlace());
       const int numel = tensor->numel();
+      printf("htj in Synchronize: before all reduce in rank %d\n", i);
       PADDLE_ENFORCE(platform::dynload::ncclAllReduce(data, data, numel,
-            ncclFloat, ncclSum, nccl_ctx.comm(), nccl_ctx.stream()));
+            ncclFloat, ncclSum, nccl_ctx.comm(), nccl_ctx.stream()), "nccl all reduce error");
       LOG(ERROR) << "Sync " << name;
       // TODO: average reduced param
     }
@@ -130,7 +150,8 @@ void SynchronizeFunctor::Synchronize() {
   nccl_ctx_map_->WaitAll();
 }
 
-#define SEC_V3LOG VLOG(3) << "[r" << kRankId << "s" << sec_index_ << "t" << i << "] "
+//#define SEC_V3LOG VLOG(3) << "[r" << kRankId << "s" << sec_index_ << "t" << i << "] "
+#define SEC_V3LOG LOG(ERROR) << "[r" << kRankId << "s" << sec_index_ << "t" << i << "] "
 
 PipeSection::PipeSection(const PipeSectionConfig& cfg, int rank_id) : kRankId(rank_id) {
   program_.reset(new ProgramDesc(cfg.program_desc()));
@@ -253,6 +274,7 @@ void PipeSection::Start(std::vector<std::thread>* pipe_threads) {
   for (int i = 0; i < concurrency_; ++i) {
     pipe_threads->push_back(std::thread([this, i]() {
       AutoSetCPUAffinity(true);
+      cudaSetDevice(kRankId);
 
       long step_cnt = 0;
       long accum_num = 0;
@@ -264,6 +286,7 @@ void PipeSection::Start(std::vector<std::thread>* pipe_threads) {
       PIPELINE_PROFILE_DECLARE(trans);
       PIPELINE_PROFILE_DECLARE(main);
       PIPELINE_PROFILE_DECLARE(outer);
+      PIPELINE_PROFILE_DECLARE(sync);
 
       bool started = false;
       while (joint_in_->Receive(&scope)) {
@@ -278,6 +301,9 @@ void PipeSection::Start(std::vector<std::thread>* pipe_threads) {
           PIPELINE_PROFILE_RESUME(reader);
           batch_size = (*read_func_)(scope, i);
           PIPELINE_PROFILE_PAUSE(reader);
+#ifdef DEBUG
+        SEC_V3LOG << "htj in read_func, the batchsize is: " << batch_size;
+#endif
 
           if (batch_size <= 0) {
             break;
@@ -306,6 +332,7 @@ void PipeSection::Start(std::vector<std::thread>* pipe_threads) {
           }
 
           for (const std::string& name : joint_in_var_names_) {
+						SEC_V3LOG << " varname: " << name;
             const LoDTensor& src_tensor = scope->FindVar(name)->Get<LoDTensor>();
             if (platform::is_gpu_place(src_tensor.place())) {
               continue;
@@ -316,21 +343,54 @@ void PipeSection::Start(std::vector<std::thread>* pipe_threads) {
 
             TensorCopy(*static_cast<const Tensor*>(&src_tensor), place_, *dev_ctx_,
                 static_cast<Tensor*>(gpu_tensor));
+						SEC_V3LOG << "copy succeed";
           }
 
           PIPELINE_PROFILE_PAUSE(trans);
         }
 
 
-        SEC_V3LOG << "run ops";
         PIPELINE_PROFILE_RESUME(calc);
+#ifdef DEBUG
+        fprintf(stderr, "htj prepare to run op in r:%d, section:%d, thread:%d\n", kRankId, sec_index_, i);
+#endif
         for (auto& op : ops_) {
+#ifdef DEBUG
+        	fprintf(stderr, "htj in line:%d\n", __LINE__);
+#endif
+					SEC_V3LOG << op->Type() << " op start in place=[" << (platform::is_gpu_place(place_)?"GPU":"CPU") << "]";
+#ifdef DEBUG
+					SEC_V3LOG << op->Type() << " op inputs:";
+					for (const std::string& name : op->InputVars()) {
+						SEC_V3LOG << op->Type() << " op input=[" << name << "]";
+						Variable* var = exe_scope->FindVar(name);
+						platform::Place place;
+						if (var->IsType<LoDTensor>()) {
+							place = exe_scope->FindVar(name)->Get<LoDTensor>().place();
+						} else if (var->IsType<SelectedRows>()) {
+							place = exe_scope->FindVar(name)->Get<SelectedRows>().place();
+						} else {
+							PADDLE_ENFORCE(false, "unexpected variable type");
+						}
+						SEC_V3LOG << op->Type() << " op input=[" << name << "] place=[" << (platform::is_gpu_place(place)?"GPU":"CPU") << "]";
+						//SEC_V3LOG << op->Type() << " op input=[" << name << "] place=[" << (platform::is_gpu_place(place)?"GPU":"CPU") << "]";
+					}
+#endif
           op->Run(*exe_scope, place_);
         }
+#ifdef DEBUG
+        fprintf(stderr, "htj succeed to run op in r:%d, section:%d, thread:%d\n", kRankId, sec_index_, i);
+#endif
         exe_scope->DropKids();
         // Wait for GPU calc finising, as the cudaMemcpy and GPU calc may be in different streams
         // No effect when it is a CPUDeviceContext
+#ifdef DEBUG
+        SEC_V3LOG << "htj before dev_ctx->wait";
+#endif
         dev_ctx_->Wait();
+#ifdef DEBUG
+        SEC_V3LOG << "htj after dev_ctx->wait";
+#endif
         PIPELINE_PROFILE_PAUSE(calc);
 
         if (next_ != nullptr && platform::is_gpu_place(place_)) {
@@ -355,6 +415,9 @@ void PipeSection::Start(std::vector<std::thread>* pipe_threads) {
           PIPELINE_PROFILE_PAUSE(trans);
         }
 
+#ifdef DEBUG
+        SEC_V3LOG << "htj send scope to next section successfully";
+#endif
         joint_out_->Send(scope);
 
         if (sync_func_) {
@@ -372,12 +435,22 @@ void PipeSection::Start(std::vector<std::thread>* pipe_threads) {
 
       concurrency_mutex_.lock();
       --concurrency_monitor_;
+#ifdef DEBUG
+        fprintf(stderr, "htj in line%d, close joint out\n", __LINE__);
+        SEC_V3LOG << "htj minus --concurrency_monitor_ to " << concurrency_monitor_;
+#endif
       concurrency_mutex_.unlock();
 
       if (concurrency_monitor_ <= 0) {
-        while (joint_out_->Size()) {
+#ifdef DEBUG
+          SEC_V3LOG << "htj in exit function ";
+#endif
+        while (sec_index_ < sec_num_-1 && joint_out_->Size()) {
           sleep(1);
         }
+#ifdef DEBUG
+          SEC_V3LOG << "htj close";
+#endif
         joint_out_->Close();
       }
 
@@ -407,7 +480,8 @@ void PipeSection::Start(std::vector<std::thread>* pipe_threads) {
   }
 }
 
-#define PL_V3LOG VLOG(3) << "[r" << rank_id_ << "] "
+#define PL_V3LOG LOG(ERROR) << "[r" << rank_id_ << "] "
+//#define PL_V3LOG VLOG(3) << "[r" << rank_id_ << "] "
 
 void PipelineWorker::Initialize(const TrainerDesc& desc) {
   const PipelineWorkerParameter& sec_param = desc.pipeline_param();
@@ -442,6 +516,7 @@ void PipelineWorker::Initialize(const TrainerDesc& desc) {
 
   nasync_steps_ = sec_param.nasync_steps();
   PL_V3LOG << "asynchronous training steps: " << nscopes_;
+  /*
   if (nranks_ > 1) {
     SynchronizeFunctor* func = new SynchronizeFunctor(rank_id_, nranks_, nasync_steps_);
     func->SetSyncParamNames(param_names);
@@ -453,6 +528,7 @@ void PipelineWorker::Initialize(const TrainerDesc& desc) {
       }
     }
   }
+  */
 }
 
 void PipelineWorker::CreateDeviceResource(const ProgramDesc& main_prog) {
@@ -466,6 +542,7 @@ void PipelineWorker::CreateDeviceResource(const ProgramDesc& main_prog) {
   PipeJoint* scope_pool = joints_.front().get();
   InitScopePool(scope_pool);
 
+  std::vector<std::string> param_names;
   for (size_t i = 0; i < sections_.size(); ++i) {
     PipeJoint* joint_in = joints_.back().get();
     PipeJoint* joint_out = nullptr;
@@ -476,7 +553,21 @@ void PipelineWorker::CreateDeviceResource(const ProgramDesc& main_prog) {
       joint_out = joints_.front().get();
     }
     sections_[i]->SetJoint(joint_in, joint_out);
+    sections_[i]->RetrieveSyncParamNames(&param_names);
     sections_[i]->CopyParameters(*root_scope_, pipeline_scope_);
+  }
+  if (nranks_ > 1) {
+    SynchronizeFunctor* func = new SynchronizeFunctor(rank_id_, nranks_, nasync_steps_);
+    func->SetSyncParamNames(param_names);
+    //func->pipeline_scopes_[rank_id_] = pipeline_scope_;
+    func->SetPipelineScope(rank_id_, pipeline_scope_);
+    sync_func_.reset(func);
+    for (int i = sections_.size() - 1; i >= 0; --i) {
+      if (platform::is_gpu_place(sections_[i]->place())) {
+        sections_[i]->SetSynchronizeFunctor(sync_func_.get());
+        break;
+      }
+    }
   }
 }
 
@@ -485,7 +576,13 @@ void PipelineWorker::InitScopePool(PipeJoint* scope_pool) {
   for (int i = 0; i < nscopes_; ++i) {
     Scope* scope = &pipeline_scope_->NewScope();
     for (auto& var : main_program_->Block(0).AllVars()) {
+#ifdef DEBUG
+        //fprintf(stderr, "htj in %s: pipe scope: varname: %s\n", __FUNCTION__, var->Name().c_str());
+#endif
       if (!var->Persistable()) {
+#ifdef DEBUG
+        //fprintf(stderr, "htj in %s: non-persistable varname: %s\n", __FUNCTION__, var->Name().c_str());
+#endif
         auto* ptr = scope->Var(var->Name());
         InitializeVariable(ptr, var->GetType());
       }
@@ -503,8 +600,39 @@ void PipelineWorker::TrainFiles() {
   for (auto& t : pipe_threads_) {
     t.join();
   }
+  PL_V3LOG << "train succeed";
 
   // log performance
+#ifdef PIPELINE_PROFILE
+  for (int i = 0; i < sections_.size(); ++i) {
+    const auto &stat = sections_[i]->GetStats();
+
+    PipeSection::ProfileStat summary_stat;
+    size_t con_num = stat.size();
+    for (int j = 0; j < con_num; ++j) {
+      summary_stat.reader_ratio += stat[j].reader_ratio  / con_num;
+      summary_stat.reader_us += stat[j].reader_us  / con_num;
+      summary_stat.reader_throughput += stat[j].reader_throughput;
+      summary_stat.trans_ratio += stat[j].trans_ratio  / con_num;
+      summary_stat.trans_us += stat[j].trans_us  / con_num;
+      summary_stat.trans_throughput += stat[j].trans_throughput;
+      summary_stat.calc_ratio += stat[j].calc_ratio  / con_num;
+      summary_stat.calc_us += stat[j].calc_us  / con_num;
+      summary_stat.calc_throughput += stat[j].calc_throughput;
+      summary_stat.sync_ratio += stat[j].sync_ratio  / con_num;
+      summary_stat.sync_us += stat[j].sync_us  / con_num;
+      summary_stat.sync_throughput += stat[j].sync_throughput;
+      summary_stat.main_ratio += stat[j].main_ratio  / con_num;
+      summary_stat.main_us += stat[j].main_us  / con_num;
+      summary_stat.main_throughput += stat[j].main_throughput;
+      summary_stat.outer_throughput += stat[j].outer_throughput;
+      summary_stat.instance_num += stat[j].instance_num;
+    }
+    PL_V3LOG << "profile for section: " << i;
+    PL_V3LOG << "reader throughput: " << summary_stat.reader_throughput;
+    PL_V3LOG << "main throughput: " << summary_stat.main_throughput;
+  }
+#endif
 }
 
 }  // namespace framework

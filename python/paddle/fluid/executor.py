@@ -811,6 +811,8 @@ class Executor(object):
         dataset._prepare_to_run()
         if debug:
             self._dump_debug_info(program=program, trainer=trainer)
+        print("thread_num in trainer desc: " + str(trainer.proto_desc.thread_num))
+        #exit(1)
         self._default_executor.run_from_dataset(program.desc, scope,
                                                 dataset.dataset,
                                                 trainer._desc())

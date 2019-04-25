@@ -201,6 +201,8 @@ void DatasetImpl<T>::CreateReaders() {
   CHECK(thread_num_ > 0) << "thread_num should > 0";
   int file_cnt = filelist_.size();
   int memory_data_size = memory_data_.size();
+  printf("htj thread num in dataset: %d\n", thread_num_);
+  printf("htj file num: %d\n", file_cnt);
   if (memory_data_size != 0 && thread_num_ > memory_data_size) {
     VLOG(3) << "Dataset thread num = " << thread_num_
             << ", memory data size = " << memory_data_size
@@ -231,6 +233,7 @@ void DatasetImpl<T>::CreateReaders() {
     readers_.back()->SetFileListIndex(&file_idx_);
     readers_.back()->SetFileList(filelist_);
   }
+  printf("htj readers num: %d\n", int(readers_.size()));
 }
 
 template <typename T>

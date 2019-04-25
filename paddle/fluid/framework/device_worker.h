@@ -237,6 +237,14 @@ class SynchronizeFunctor : public PipelineFunctor {
   }
 
   int operator()(Scope* scope, int index) override;
+  //static std::vector<Scope*>	pipeline_scopes_;
+  void SetPipelineScope(int k, Scope *pipeline_scope) {
+    PADDLE_ENFORCE(k < pipeline_scopes_.size(), "exceed number of card");
+    pipeline_scopes_[k] = pipeline_scope;
+  }
+  static void remove_nccl_map() {
+    nccl_ctx_map_.reset(nullptr);
+  }
 
  protected:
   static std::unique_ptr<platform::NCCLContextMap> nccl_ctx_map_;
@@ -254,7 +262,7 @@ class SynchronizeFunctor : public PipelineFunctor {
   int counter_;
 
   std::vector<std::string> sync_param_names_;
-  std::vector<Scope*>	pipeline_scopes_;
+  static std::vector<Scope*>	pipeline_scopes_;
 
   void Synchronize();
 
@@ -300,6 +308,27 @@ class PipeSection {
 
   void RetrieveSyncParamNames(std::vector<std::string>* param_vars);
 
+  struct ProfileStat {
+    double reader_ratio = 0;
+    double reader_us = 0;
+    double reader_throughput = 0;
+    double trans_ratio = 0;
+    double trans_us = 0;
+    double trans_throughput = 0;
+    double calc_ratio = 0;
+    double calc_us = 0;
+    double calc_throughput = 0;
+    double sync_ratio = 0;
+    double sync_us = 0;
+    double sync_throughput = 0;
+    double main_ratio = 0;
+    double main_us = 0;
+    double main_throughput = 0;
+    double outer_throughput = 0;
+    double instance_num = 0;
+  };
+
+  std::vector<ProfileStat> GetStats() const {return stats_;}
  protected:
   const int kRankId;
 
@@ -330,6 +359,8 @@ class PipeSection {
   std::mutex concurrency_mutex_;
 
   std::vector<std::unique_ptr<OperatorBase>> ops_;
+
+  std::vector<ProfileStat> stats_;
 
   void Postprocess(Scope* scope);
 

@@ -24,6 +24,7 @@ namespace framework {
 void MultiTrainer::Initialize(const TrainerDesc& trainer_desc,
                               Dataset* dataset) {
   thread_num_ = trainer_desc.thread_num();
+  printf("htj thread num in cpp in trainer desc: %d\n", thread_num_);
   dataset_ptr_ = dataset;
   // get filelist from trainer_desc here
   dataset->CreateReaders();
@@ -37,6 +38,7 @@ void MultiTrainer::Initialize(const TrainerDesc& trainer_desc,
   int nreaders_each = readers.size() / thread_num_;
   VLOG(3) << "worker thread num: " << thread_num_;
   workers_.resize(thread_num_);
+  printf("htj the actual thread_num also the workers num: %d\n", thread_num_);
   for (int i = 0; i < thread_num_; ++i) {
     workers_[i] = DeviceWorkerFactory::CreateDeviceWorker(
         trainer_desc.device_worker_name());
@@ -83,6 +85,7 @@ void MultiTrainer::Finalize() {
   for (auto& th : threads_) {
     th.join();
   }
+  SynchronizeFunctor::remove_nccl_map();
   dataset_ptr_->DestroyReaders();
   root_scope_->DropKids();
 }
