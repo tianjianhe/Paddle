@@ -1064,6 +1064,166 @@ bool MultiSlotFileInstantDataFeed::ParseOneMiniBatch() {
                  "offset_ != end_");
   return true;
 }
+
+int PrivateSSDDataFeed::fake_get_pass(
+    std::vector<std::vector<std::pair<std::string, std::vector<float>>>>&
+        pass_data_,
+    int& batch_size) {
+  // Fake data: one pass has 4 ins
+  static std::vector<std::vector<std::pair<std::string, std::vector<float>>>>
+      fake_pass_data{std::vector<std::pair<std::string, std::vector<float>>>{
+                         std::make_pair("emb_x", std::vector<float>{0., 1.}),
+                         std::make_pair("emb_y", std::vector<float>{0., 1.})},
+                     std::vector<std::pair<std::string, std::vector<float>>>{
+                         std::make_pair("emb_x", std::vector<float>{0., 1.}),
+                         std::make_pair("emb_y", std::vector<float>{0., 1.})},
+                     std::vector<std::pair<std::string, std::vector<float>>>{
+                         std::make_pair("emb_x", std::vector<float>{0., 1.}),
+                         std::make_pair("emb_y", std::vector<float>{0., 1.})},
+                     std::vector<std::pair<std::string, std::vector<float>>>{
+                         std::make_pair("emb_x", std::vector<float>{0., 1.}),
+                         std::make_pair("emb_y", std::vector<float>{0., 1.})}};
+  static int pass_num = 5;
+  if (pass_num > 0) {
+    printf("HTJLOG, remain %d pass\n", pass_num);
+    pass_data_ = fake_pass_data;
+    batch_size = static_cast<int>(fake_pass_data.size());
+    pass_num--;
+    return 0;
+  } else {
+    return -1;
+  }
+}
+
+int PrivateSSDDataFeed::fake_put_grad(
+    const std::vector<std::vector<std::pair<std::string, std::vector<float>>>>&
+        pass_data_) {
+  printf("HTJLOG: fake_put_grad\n");
+  int ins_id = 0;
+  for (const auto ins : pass_data_) {
+    printf("%dth ins\n", ins_id++);
+    for (const auto& slot : ins) {
+      printf("%s: ", slot.first.c_str());
+      for (auto v : slot.second) printf("%lf ", v);
+      printf("\n");
+    }
+  }
+  return 0;
+}
+int PrivateSSDDataFeed::collect_grad(const Scope& scope) {
+  for (int i = default_batch_size_; i > 0; --i) {
+    int batch_id = start_batch_index_ - i;
+    auto& cur_ins = pass_data_[batch_id];
+    for (int j = 0; j < use_slots_.size(); ++j) {
+      const std::string& var = use_slots_[j];
+      const LoDTensor cur_grad = scope.FindVar(var + "@GRAD")->Get<LoDTensor>();
+      const float* grad_data = cur_grad.data<float>();
+      auto dim = cur_grad.numel() / default_batch_size_;
+      memcpy(&cur_ins[j].second[0], grad_data, dim * sizeof(float));
+    }
+  }
+  if (start_batch_index_ >= total_batch_num_) {
+    printf("HTJLOG: push grad\n");
+    fake_put_grad(pass_data_);
+  }
+  return 0;
+}
+
+int PrivateSSDDataFeed::Next() {
+  if (start_batch_index_ + default_batch_size_ > total_batch_num_) {
+    int ret = fake_get_pass(pass_data_, total_batch_num_);
+    if (ret != 0) {
+      return -1;
+    }
+    start_batch_index_ = 0;
+  }
+  for (auto& e : buf_vec_) {
+    e.clear();
+  }
+
+  for (int i = 0; i < default_batch_size_; ++i) {
+    int batch_id = i + start_batch_index_;
+    const auto& cur_ins = pass_data_[batch_id];
+    for (size_t j = 0; j < use_slots_index_.size(); ++j) {
+      buf_vec_[j].insert(buf_vec_[j].end(), cur_ins[j].second.begin(),
+                         cur_ins[j].second.end());
+    }
+  }
+  PutToFeedVec();
+  start_batch_index_ += default_batch_size_;
+  return default_batch_size_;
+}
+
+void PrivateSSDDataFeed::PutToFeedVec() {
+  int total_instance = static_cast<int>(buf_vec_[0].size());
+  for (size_t i = 0; i < use_slots_.size(); ++i) {
+    const auto& feasign = buf_vec_[i];
+    float* tensor_ptr = feed_vec_[i]->mutable_data<float>({total_instance, 1},
+                                                          platform::CPUPlace());
+    memcpy(tensor_ptr, &feasign[0], total_instance * sizeof(float));
+
+    LoD data_lod{buf_vec_[0].size()};
+    feed_vec_[i]->set_lod(data_lod);
+    if (use_slots_is_dense_[i]) {
+      int64_t total_dims = 1;
+      for (const auto e : use_slots_shape_[i]) {
+        total_dims *= e;
+      }
+      PADDLE_ENFORCE(
+          total_dims == total_instance,
+          "The actual data size of slot[%s] doesn't match its declaration",
+          use_slots_[i].c_str());
+      feed_vec_[i]->Resize(framework::make_ddim(use_slots_shape_[i]));
+    }
+  }
+}
+
+void PrivateSSDDataFeed::Init(const DataFeedDesc& data_feed_desc) {
+  finish_init_ = false;
+  finish_start_ = false;
+
+  PADDLE_ENFORCE(data_feed_desc.has_multi_slot_desc(),
+                 "Multi_slot_desc has not been set.");
+  paddle::framework::MultiSlotDesc multi_slot_desc =
+      data_feed_desc.multi_slot_desc();
+  SetBatchSize(data_feed_desc.batch_size());
+  size_t all_slot_num = multi_slot_desc.slots_size();
+  all_slots_.resize(all_slot_num);
+  all_slots_type_.resize(all_slot_num);
+  use_slots_index_.resize(all_slot_num);
+  multi_inductive_shape_index_.resize(all_slot_num);
+  use_slots_.clear();
+  use_slots_is_dense_.clear();
+  for (size_t i = 0; i < all_slot_num; ++i) {
+    const auto& slot = multi_slot_desc.slots(i);
+    all_slots_[i] = slot.name();
+    all_slots_type_[i] = slot.type();
+    use_slots_index_[i] = slot.is_used() ? use_slots_.size() : -1;
+    if (slot.is_used()) {
+      use_slots_.push_back(all_slots_[i]);
+      use_slots_is_dense_.push_back(slot.is_dense());
+      std::vector<int> local_shape;
+      if (slot.is_dense()) {
+        for (size_t j = 0; j < slot.shape_size(); ++j) {
+          if (slot.shape(j) == -1) {
+            multi_inductive_shape_index_[i].push_back(j);
+          }
+        }
+      }
+      for (size_t j = 0; j < slot.shape_size(); ++j) {
+        local_shape.push_back(slot.shape(j));
+      }
+      local_shape[0] =
+          default_batch_size_;  // just fake the defalut batch size now
+      use_slots_shape_.push_back(local_shape);
+    }
+  }
+  feed_vec_.resize(use_slots_.size());
+  buf_vec_.resize(use_slots_.size());
+
+  finish_init_ = true;
+}
+
 #endif
 
 }  // namespace framework

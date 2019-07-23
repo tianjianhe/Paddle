@@ -270,6 +270,7 @@ class SectionWorker : public DeviceWorker {
   void SetWorkerCount(int* worker_count) { worker_count_ = worker_count; }
   void SetSectionNum(int section_num) { section_num_ = section_num; }
   void SetPipelineNum(int pipeline_num) { pipeline_num_ = pipeline_num; }
+  void SetSSD(bool sparse_from_ssd) { sparse_from_ssd_ = sparse_from_ssd; }
   void SetNextSectionPlace(const paddle::platform::Place& place) {
     next_section_place_ = place;
   }
@@ -285,6 +286,7 @@ class SectionWorker : public DeviceWorker {
   int section_num_;
   int pipeline_num_;
   int thread_id_;
+  bool sparse_from_ssd_;
 
   // This worker will consume scope from in_scope_queue_
   // and produce scope to out_scope_queue_

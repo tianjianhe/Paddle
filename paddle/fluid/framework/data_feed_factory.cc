@@ -66,6 +66,7 @@ REGISTER_DATAFEED_CLASS(MultiSlotDataFeed);
 REGISTER_DATAFEED_CLASS(MultiSlotInMemoryDataFeed);
 #if defined(PADDLE_WITH_CUDA) && !defined(_WIN32)
 REGISTER_DATAFEED_CLASS(MultiSlotFileInstantDataFeed);
+REGISTER_DATAFEED_CLASS(PrivateSSDDataFeed);
 #endif
 }  // namespace framework
 }  // namespace paddle

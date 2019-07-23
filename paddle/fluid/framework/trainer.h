@@ -108,6 +108,7 @@ class PipelineTrainer : public TrainerBase {
   int pipeline_num_;
   int scope_queue_size_;
   int sync_steps_;
+  bool sparse_from_ssd_;
 
   SectionWorkerParameter pipeline_config_;
 

@@ -36,6 +36,7 @@ void PipelineTrainer::Initialize(const TrainerDesc& trainer_desc,
   scope_queue_size_ = pipeline_config_.queue_size();
   sync_steps_ = pipeline_config_.sync_steps();
   section_num_ = pipeline_config_.section_config_size();
+  sparse_from_ssd_ = pipeline_config_.sparse_from_ssd();
 
   VLOG(3) << "scope_queue_size: " << scope_queue_size_;
   VLOG(3) << "section num: " << section_num_;
@@ -99,8 +100,14 @@ void PipelineTrainer::Initialize(const TrainerDesc& trainer_desc,
         this_worker->SetThreadIndex(k);
         this_worker->SetSectionNum(section_num_);
         this_worker->SetPipelineNum(pipeline_num_);
+        this_worker->SetSSD(sparse_from_ssd_);
         if (i == 0) {
           this_worker->SetDataFeed(readers[reader_index++]);
+        }
+        if (i == section_num_ - 1 && sparse_from_ssd_) {
+          //just assume only one reader per section
+          //and both sections have only one thread
+          this_worker->SetDataFeed(readers[0]);
         }
         this_worker->SetPlace(place);
         this_worker->Initialize(trainer_desc);

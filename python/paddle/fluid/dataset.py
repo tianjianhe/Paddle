@@ -557,7 +557,8 @@ class FileInstantDataset(DatasetBase):
         Init
         """
         super(FileInstantDataset, self).__init__()
-        self.proto_desc.name = "MultiSlotFileInstantDataFeed"
+        #self.proto_desc.name = "MultiSlotFileInstantDataFeed"
+        self.proto_desc.name = "PrivateSSDDataFeed"
 
     def local_shuffle(self):
         """

@@ -509,6 +509,7 @@ class PrivateInstantDataFeed : public DataFeed {
   void Init(const DataFeedDesc& data_feed_desc) override;
   bool Start() override { return true; }
   int Next() override;
+  int SSDNext();
 
  protected:
   // The batched data buffer
@@ -546,6 +547,33 @@ class MultiSlotFileInstantDataFeed
   bool Postprocess() override;
 
   bool ParseOneMiniBatch() override;
+};
+
+class PrivateSSDDataFeed : public DataFeed {
+ public:
+  PrivateSSDDataFeed() {}
+  virtual ~PrivateSSDDataFeed() {}
+  void Init(const DataFeedDesc& data_feed_desc) override;
+  bool Start() override { return true; }
+  int Next() override;
+  void PutToFeedVec();
+
+  int fake_get_pass(
+      std::vector<std::vector<std::pair<std::string, std::vector<float>>>>&
+          pass_data_,
+      int& batch_size);
+  int fake_put_grad(
+      const std::vector<
+          std::vector<std::pair<std::string, std::vector<float>>>>& pass_data_);
+  int collect_grad(const Scope& scope);
+
+ protected:
+  // The batched data buffer
+  std::vector<std::vector<float>> buf_vec_;
+  int start_batch_index_ = 0;
+  int total_batch_num_ = 0;
+  std::vector<std::vector<std::pair<std::string, std::vector<float>>>>
+      pass_data_;
 };
 #endif
 

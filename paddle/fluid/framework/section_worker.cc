@@ -147,7 +147,10 @@ void SectionWorker::TrainFiles() {
   int batch_size = 0;
   Scope* scope = nullptr;
   while (in_scope_queue_->Receive(&scope)) {
-    if (device_reader_ != nullptr) {
+    if (section_id_ == 0 && device_reader_ != nullptr) {
+      if (sparse_from_ssd_) {
+        SEC_LOG << "sparse from ssd, begin reader data";
+      }
       device_reader_->AssignFeedVar(*scope);
       batch_size = device_reader_->Next();
       if (batch_size <= 0) {
@@ -223,6 +226,11 @@ void SectionWorker::TrainFiles() {
                    next_section_place_, *dev_ctx_,
                    static_cast<Tensor*>(dst_tensor));
       }
+    }
+
+    if (section_id_ == section_num_ - 1) {
+      auto ssd_reader = dynamic_cast<PrivateSSDDataFeed*>(device_reader_);
+      ssd_reader->collect_grad(*scope);
     }
 
     out_scope_queue_->Send(scope);
