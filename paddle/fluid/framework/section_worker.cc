@@ -15,6 +15,7 @@ limitations under the License. */
 #include "google/protobuf/text_format.h"
 
 #include "paddle/fluid/framework/device_worker.h"
+#include "paddle/fluid/framework/fleet/box_wrapper.h"
 #include "paddle/fluid/framework/tensor_util.h"
 #include "paddle/fluid/framework/trainer_desc.pb.h"
 #include "paddle/fluid/platform/cpu_helper.h"
@@ -146,6 +147,9 @@ void SectionWorker::TrainFiles() {
   int64_t accum_num = 0;
   int batch_size = 0;
   Scope* scope = nullptr;
+  if (device_reader_ != nullptr) {
+    device_reader_->Start();
+  }
   while (in_scope_queue_->Receive(&scope)) {
     if (device_reader_ != nullptr) {
       device_reader_->AssignFeedVar(*scope);
@@ -153,6 +157,8 @@ void SectionWorker::TrainFiles() {
       if (batch_size <= 0) {
         break;
       }
+      auto box_ptr = BoxWrapper::GetInstance();
+      box_ptr->batch_size_ = batch_size;
       SEC_LOG << "read batch size: " << batch_size;
     } else {
       // TODO(hutuxian): Keep batch_size in scope? Or is there a better way to
@@ -201,6 +207,47 @@ void SectionWorker::TrainFiles() {
     // different streams
     // No effect when it is a CPUDeviceContext
     dev_ctx_->Wait();
+
+    // Workaround for print paddlebox metrics
+    auto* click = exe_scope->FindVar("click");
+    auto* predict = exe_scope->FindVar("ctr_sigmoid.tmp_0");
+    auto* ubm_predict = exe_scope->FindVar("ubm_sigmoid.tmp_0");
+    if (click != nullptr && predict != nullptr && ubm_predict != nullptr) {
+      auto& actual_tensor = click->Get<LoDTensor>();
+      auto& pred_tensor = predict->Get<LoDTensor>();
+      auto& ubm_tensor = ubm_predict->Get<LoDTensor>();
+      auto* gpu_actual_data = actual_tensor.data<int64_t>();
+      auto* gpu_pred_data = pred_tensor.data<float>();
+      auto* gpu_ubm_data = ubm_tensor.data<float>();
+      auto box_ptr = BoxWrapper::GetInstance();
+
+      BasicAucCalculator *day_cal_ = nullptr;
+      BasicAucCalculator *day_ubm_cal_ = nullptr;
+      if (box_ptr->cal_->pass_id % 2) {
+        day_cal_ = box_ptr->day_join_cal_.get();
+        day_ubm_cal_ = box_ptr->day_ubm_join_cal_.get();
+      } else {
+        day_cal_ = box_ptr->day_update_cal_.get();
+        day_ubm_cal_ = box_ptr->day_ubm_update_cal_.get();
+      }
+
+      int64_t actual_data[4099];
+      float pred_data[4099];
+      float ubm_data[4099];
+      auto len = actual_tensor.numel();
+      cudaMemcpy(actual_data, gpu_actual_data, sizeof(int64_t) * len,
+                 cudaMemcpyDeviceToHost);
+      cudaMemcpy(pred_data, gpu_pred_data, sizeof(float) * len,
+                 cudaMemcpyDeviceToHost);
+      cudaMemcpy(ubm_data, gpu_ubm_data, sizeof(float) * len,
+                 cudaMemcpyDeviceToHost);
+      for (auto i = 0; i < len; ++i) {
+        box_ptr->cal_->add_data(pred_data[i], actual_data[i]);
+        box_ptr->ubm_cal_->add_data(ubm_data[i], actual_data[i]);
+        day_cal_->add_data(pred_data[i], actual_data[i]);
+        day_ubm_cal_->add_data(ubm_data[i], actual_data[i]);
+      }
+    }
 
     if (section_id_ != section_num_ - 1 && platform::is_gpu_place(place_)) {
       // FIXME: Temporarily we assume two adjacent sections are in different
@@ -275,6 +322,9 @@ void SectionWorker::TrainFilesWithProfiler() {
   platform::Timer timeline;
 
   bool started = false;
+  if (device_reader_ != nullptr) {
+    device_reader_->Start();
+  }
   while (in_scope_queue_->Receive(&scope)) {
     if (UNLIKELY(!started)) {
       outer_timer.Start();

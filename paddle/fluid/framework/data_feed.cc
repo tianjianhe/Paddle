@@ -237,6 +237,7 @@ bool InMemoryDataFeed<T>::Start() {
   if (output_channel_->Size() == 0 && input_channel_->Size() != 0) {
     std::vector<T> data;
     input_channel_->Read(data);
+    fprintf(stderr, "htj, channel size: %d\n", static_cast<int>(data.size()));
     output_channel_->Write(std::move(data));
   }
 #endif
@@ -719,6 +720,10 @@ void MultiSlotInMemoryDataFeed::Init(
   for (size_t i = 0; i < all_slot_num; ++i) {
     const auto& slot = multi_slot_desc.slots(i);
     all_slots_[i] = slot.name();
+    // filter non feasign slot in feed pass
+    if (slot.name() == "click") {
+      index_omited_in_feedpass_.insert(use_slots_.size());
+    }
     all_slots_type_[i] = slot.type();
     use_slots_index_[i] = slot.is_used() ? use_slots_.size() : -1;
     total_dims_without_inductive_[i] = 1;

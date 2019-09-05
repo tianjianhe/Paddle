@@ -54,6 +54,8 @@ class Collective(object):
         # in case of '127.0.0.1:6700,127.0.0.1:6701,...'
         if isinstance(endpoints, str):
             endpoints = endpoints.split(',')
+        print("endpoints in collective.py:" + str(endpoints))
+        print("rank=" + str(rank))
 
         self.startup_program = startup_program
         if startup_program is None:
@@ -65,7 +67,8 @@ class Collective(object):
 
         self.nranks = len(endpoints)
         if self.nranks == 1:
-            raise ValueError('the number of endpoints must > 1')
+            pass
+        #raise ValueError('the number of endpoints must > 1')
 
         if rank < 0:
             raise ValueError('rank must >= 0')
@@ -90,6 +93,10 @@ class Collective(object):
         raise NotImplementedError('call the inherited method of subclasses')
 
     def _transpile_startup_program(self):
+        if self.nranks == 1:
+            block = self.startup_program.global_block()
+            block.append_op(type='c_comm_init_all', attrs={'ring_id': 0})
+            return
         for ring_id in range(self.nrings):
             self._init_communicator(self.startup_program, self.current_endpoint,
                                     self.endpoints, self.rank, ring_id,

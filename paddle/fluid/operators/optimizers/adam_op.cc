@@ -28,6 +28,8 @@ void AdamOp::InferShape(framework::InferShapeContext* ctx) const {
                  "Input(Moment1) of AdamOp should not be null.");
   PADDLE_ENFORCE(ctx->HasInput("Moment2"),
                  "Input(Moment2) of AdamOp should not be null.");
+  PADDLE_ENFORCE(ctx->HasInput("Moment3"),
+                 "Input(Moment3) of AdamOp should not be null.");
   PADDLE_ENFORCE(ctx->HasInput("LearningRate"),
                  "Input(LearningRate) of AdamOp should not be null.");
   PADDLE_ENFORCE(ctx->HasInput("Beta1Pow"),
@@ -41,6 +43,8 @@ void AdamOp::InferShape(framework::InferShapeContext* ctx) const {
                  "Output(Moment1Out) of AdamOp should not be null.");
   PADDLE_ENFORCE(ctx->HasOutput("Moment2Out"),
                  "Output(Moment2Out) of AdamOp should not be null.");
+  PADDLE_ENFORCE(ctx->HasOutput("Moment3Out"),
+                 "Output(Moment3Out) of AdamOp should not be null.");
 
   auto lr_dims = ctx->GetInputDim("LearningRate");
   PADDLE_ENFORCE_EQ(framework::product(lr_dims), 1,
@@ -65,10 +69,14 @@ void AdamOp::InferShape(framework::InferShapeContext* ctx) const {
   PADDLE_ENFORCE_EQ(
       param_dims, ctx->GetInputDim("Moment2"),
       "Param and Moment2 input of AdamOp should have same dimension");
+  PADDLE_ENFORCE_EQ(
+      param_dims, ctx->GetInputDim("Moment3"),
+      "Param and Moment3 input of AdamOp should have same dimension");
 
   ctx->SetOutputDim("ParamOut", param_dims);
   ctx->SetOutputDim("Moment1Out", param_dims);
   ctx->SetOutputDim("Moment2Out", param_dims);
+  ctx->SetOutputDim("Moment3Out", param_dims);
 }
 
 framework::OpKernelType AdamOp::GetExpectedKernelType(
@@ -85,12 +93,14 @@ class AdamOpMaker : public framework::OpProtoAndCheckerMaker {
     AddInput("LearningRate", "(Tensor) Learning rate");
     AddInput("Moment1", "(Tensor) Input first moment");
     AddInput("Moment2", "(Tensor) Input second moment");
+    AddInput("Moment3", "(Tensor) Input second moment");
     AddInput("Beta1Pow", "(Tensor) Input beta1 power accumulator");
     AddInput("Beta2Pow", "(Tensor) Input beta2 power accumulator");
 
     AddOutput("ParamOut", "(Tensor) Output parameter");
     AddOutput("Moment1Out", "(Tensor) Output first moment");
     AddOutput("Moment2Out", "(Tensor) Output second moment");
+    AddOutput("Moment3Out", "(Tensor) Output second moment");
 
     AddAttr<float>("beta1",
                    "(float, default 0.9) "

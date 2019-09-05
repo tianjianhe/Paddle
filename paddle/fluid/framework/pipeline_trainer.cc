@@ -15,6 +15,7 @@
 #if defined(PADDLE_WITH_CUDA) && !defined(_WIN32)
 #include "paddle/fluid/framework/data_feed_factory.h"
 #include "paddle/fluid/framework/device_worker_factory.h"
+#include "paddle/fluid/framework/fleet/box_wrapper.h"
 #include "paddle/fluid/framework/trainer.h"
 #include "paddle/fluid/framework/trainer_desc.pb.h"
 
@@ -23,7 +24,8 @@ namespace framework {
 
 void PipelineTrainer::Initialize(const TrainerDesc& trainer_desc,
                                  Dataset* dataset) {
-  pipeline_num_ = trainer_desc.thread_num();
+  // pipeline_num_ = trainer_desc.thread_num();
+  pipeline_num_ = platform::GetCUDADeviceCount();
   VLOG(3) << "pipeline num: " << pipeline_num_;
 
   SetDataset(dataset);
@@ -192,7 +194,7 @@ void PipelineTrainer::InitTrainerEnv(const ProgramDesc& main_program,
     }
   }
 
-  if (pipeline_num_ > 1) {
+  if (false && pipeline_num_ > 1) {
     construct_sync_functor();
   }
 }
@@ -250,6 +252,73 @@ void PipelineTrainer::Run() {
 void PipelineTrainer::Finalize() {
   for (auto& th : section_threads_) {
     th.join();
+  }
+
+  // print AUC
+  auto box_ptr = BoxWrapper::GetInstance();
+  BasicAucCalculator *day_cal_ = nullptr;
+  BasicAucCalculator *day_ubm_cal_ = nullptr;
+  if (box_ptr->cal_->pass_id % 2) {
+    day_cal_ = box_ptr->day_join_cal_.get();
+    day_ubm_cal_ = box_ptr->day_ubm_join_cal_.get();
+  } else {
+    day_cal_ = box_ptr->day_update_cal_.get();
+    day_ubm_cal_ = box_ptr->day_ubm_update_cal_.get();
+  }
+  box_ptr->cal_->calculate_bucket_error();
+  box_ptr->ubm_cal_->calculate_bucket_error();
+  box_ptr->cal_->compute();
+  box_ptr->ubm_cal_->compute();
+  fprintf(stdout,
+          "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
+          "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
+          box_ptr->cal_->pass_id++ % 2 ? "pass_ctr_join_model"
+                                       : "pass_ctr_update_model",
+          box_ptr->cal_->auc(), box_ptr->cal_->bucket_error(),
+          box_ptr->cal_->mae(), box_ptr->cal_->rmse(),
+          box_ptr->cal_->actual_ctr(), box_ptr->cal_->predicted_ctr(),
+          box_ptr->cal_->actual_ctr() / box_ptr->cal_->predicted_ctr(),
+          box_ptr->cal_->size());
+  box_ptr->cal_->reset();
+  fprintf(stdout,
+          "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
+          "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
+          box_ptr->ubm_cal_->pass_id++ % 2 ? "pass_ubm_join_model"
+                                       : "pass_ubm_update_model",
+          box_ptr->ubm_cal_->auc(), box_ptr->ubm_cal_->bucket_error(),
+          box_ptr->ubm_cal_->mae(), box_ptr->ubm_cal_->rmse(),
+          box_ptr->ubm_cal_->actual_ctr(), box_ptr->ubm_cal_->predicted_ctr(),
+          box_ptr->ubm_cal_->actual_ctr() / box_ptr->ubm_cal_->predicted_ctr(),
+          box_ptr->ubm_cal_->size());
+  box_ptr->ubm_cal_->reset();
+
+  day_cal_->calculate_bucket_error();
+  day_cal_->compute();
+  day_ubm_cal_->calculate_bucket_error();
+  day_ubm_cal_->compute();
+  if (day_cal_->pass_id++ % 96 == 0) {
+    fprintf(stdout,
+          "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
+          "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
+          box_ptr->cal_->pass_id % 2 ? "day_ctr_update_model"
+                                       : "day_ctr_join_model",
+          day_cal_->auc(), day_cal_->bucket_error(),
+          day_cal_->mae(), day_cal_->rmse(),
+          day_cal_->actual_ctr(), day_cal_->predicted_ctr(),
+          day_cal_->actual_ctr() / day_cal_->predicted_ctr(),
+          day_cal_->size());
+    day_cal_->reset();
+    fprintf(stdout,
+          "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
+          "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
+          box_ptr->ubm_cal_->pass_id % 2 ? "day_ubm_update_model"
+                                       : "day_ubm_join_model",
+          day_ubm_cal_->auc(), day_ubm_cal_->bucket_error(),
+          day_ubm_cal_->mae(), day_ubm_cal_->rmse(),
+          day_ubm_cal_->actual_ctr(), day_ubm_cal_->predicted_ctr(),
+          day_ubm_cal_->actual_ctr() / day_ubm_cal_->predicted_ctr(),
+          day_ubm_cal_->size());
+    day_ubm_cal_->reset();
   }
   for (const auto& var : *param_need_sync_) {
     auto* root_tensor = root_scope_->Var(var)->GetMutable<LoDTensor>();

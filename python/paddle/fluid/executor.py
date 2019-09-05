@@ -953,7 +953,7 @@ class Executor(object):
         if dataset == None:
             raise RuntimeError("dataset is need and should be initialized")
 
-        if program._pipeline_opt:
+        if False and program._pipeline_opt:
             thread = self._adjust_pipeline_resource(program._pipeline_opt,
                                                     dataset, thread)
 

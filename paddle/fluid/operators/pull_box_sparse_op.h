@@ -48,6 +48,7 @@ static void PullBoxSparseFunctor(const framework::ExecutionContext &ctx) {
 
 template <typename T>
 static void PushBoxSparseFunctor(const framework::ExecutionContext &ctx) {
+  VLOG(3) << "begin PushBoxSparseFunctor";
   auto inputs = ctx.MultiInput<framework::Tensor>("Ids");
   auto d_output =
       ctx.MultiInput<framework::Tensor>(framework::GradVarName("Out"));
@@ -66,8 +67,11 @@ static void PushBoxSparseFunctor(const framework::ExecutionContext &ctx) {
     all_grad_values[i] = grad_value;
   }
   auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
+  VLOG(3) << "calling PushSparseGrad";
   box_ptr->PushSparseGrad(ctx.GetPlace(), all_keys, all_grad_values,
                           slot_lengths, hidden_size);
+  VLOG(3) << "called PushSparseGrad";
+  VLOG(3) << "end PushBoxSparseFunctor";
 }
 
 using LoDTensor = framework::LoDTensor;

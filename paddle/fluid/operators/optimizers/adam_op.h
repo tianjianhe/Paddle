@@ -56,6 +56,8 @@ struct AdamFunctor<T, GPUAdam> {
   T* moment1_out_;
   const T* moment2_;
   T* moment2_out_;
+  const T* moment3_;
+  T* moment3_out_;
   const T* lr_;
   const T* grad_;
   const T* param_;
@@ -63,8 +65,8 @@ struct AdamFunctor<T, GPUAdam> {
 
   AdamFunctor(T beta1, T beta2, T epsilon, const T* beta1_pow,
               const T* beta2_pow, const T* mom1, T* mom1_out, const T* mom2,
-              T* mom2_out, const T* lr, const T* grad, const T* param,
-              T* param_out)
+              T* mom2_out, const T* mom3, T* mom3_out, const T* lr,
+              const T* grad, const T* param, T* param_out)
       : beta1_(beta1),
         beta2_(beta2),
         epsilon_(epsilon),
@@ -74,6 +76,8 @@ struct AdamFunctor<T, GPUAdam> {
         moment1_out_(mom1_out),
         moment2_(mom2),
         moment2_out_(mom2_out),
+        moment3_(mom3),
+        moment3_out_(mom3_out),
         lr_(lr),
         grad_(grad),
         param_(param),
@@ -84,21 +88,20 @@ struct AdamFunctor<T, GPUAdam> {
     T g = grad_[i];
     T mom1 = moment1_[i];
     T mom2 = moment2_[i];
+    T mom3 = moment3_[i];
     T lr = *lr_;
-    T beta1_pow = *beta1_pow_;
-    T beta2_pow = *beta2_pow_;
     T p = param_[i];
 
-    // Calculation
-    lr *= sqrt(1 - beta2_pow) / (1 - beta1_pow);
-
     mom1 = beta1_ * mom1 + (1 - beta1_) * g;
-    mom2 = beta2_ * mom2 + (1 - beta2_) * g * g;
-    p -= lr * (mom1 / (sqrt(mom2) + epsilon_));
+    mom2 = beta2_ * mom2 + g * g;
+    mom3 = 0.9999 * mom3 + 1;
+    T scale = sqrt((1 + epsilon_) / (mom2 / mom3 + epsilon_));
+    p -= lr * mom1 * scale;
 
     // Write back to global memory
     moment1_out_[i] = mom1;
     moment2_out_[i] = mom2;
+    moment3_out_[i] = mom3;
     param_out_[i] = p;
   }
 };
@@ -375,6 +378,7 @@ class AdamOpKernel : public framework::OpKernel<T> {
     auto* grad_var = ctx.InputVar("Grad");
     auto& mom1 = Ref(ctx.Input<LoDTensor>("Moment1"), "Must set Moment1");
     auto& mom2 = Ref(ctx.Input<LoDTensor>("Moment2"), "Must set Moment2");
+    auto& mom3 = Ref(ctx.Input<LoDTensor>("Moment3"), "Must set Moment3");
     auto& lr =
         Ref(ctx.Input<LoDTensor>("LearningRate"), "Must set LearningRate");
 
@@ -389,6 +393,8 @@ class AdamOpKernel : public framework::OpKernel<T> {
         Ref(ctx.Output<LoDTensor>("Moment1Out"), "Must set Moment1Out");
     auto& mom2_out =
         Ref(ctx.Output<LoDTensor>("Moment2Out"), "Must set Moment1Out");
+    auto& mom3_out =
+        Ref(ctx.Output<LoDTensor>("Moment3Out"), "Must set Moment3Out");
 
     if (grad_var->IsType<framework::LoDTensor>()) {
       auto& grad = Ref(ctx.Input<LoDTensor>("Grad"), "Must set Grad");
@@ -411,6 +417,8 @@ class AdamOpKernel : public framework::OpKernel<T> {
             mom1_out.template mutable_data<T>(ctx.GetPlace()),
             mom2.template data<T>(),
             mom2_out.template mutable_data<T>(ctx.GetPlace()),
+            mom3.template data<T>(),
+            mom3_out.template mutable_data<T>(ctx.GetPlace()),
             lr.template data<T>(), grad.template data<T>(),
             param.template data<T>(),
             param_out.template mutable_data<T>(ctx.GetPlace()));

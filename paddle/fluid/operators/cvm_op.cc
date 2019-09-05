@@ -53,7 +53,7 @@ class CVMOp : public framework::OperatorWithKernel {
   framework::OpKernelType GetExpectedKernelType(
       const framework::ExecutionContext& ctx) const override {
     return framework::OpKernelType(ctx.Input<Tensor>("X")->type(),
-                                   platform::CPUPlace());
+                                   ctx.device_context());
   }
 };
 
@@ -94,7 +94,7 @@ class CVMGradientOp : public framework::OperatorWithKernel {
   framework::OpKernelType GetExpectedKernelType(
       const framework::ExecutionContext& ctx) const override {
     return framework::OpKernelType(ctx.Input<Tensor>("X")->type(),
-                                   platform::CPUPlace());
+                                   ctx.device_context());
   }
 };
 

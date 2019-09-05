@@ -23,6 +23,7 @@ limitations under the License. */
 #include <future>  // NOLINT
 #include <memory>
 #include <mutex>  // NOLINT
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>  // NOLINT
@@ -175,6 +176,9 @@ class DataFeed {
   std::vector<std::string> ins_id_vec_;
   std::vector<std::string> ins_content_vec_;
   platform::Place place_;
+
+ public:
+  std::set<int> index_omited_in_feedpass_;
 };
 
 // PrivateQueueDataFeed is the base virtual class for ohther DataFeeds.

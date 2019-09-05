@@ -37,14 +37,26 @@ namespace pybind {
 void BindBoxHelper(py::module* m) {
   py::class_<framework::BoxHelper, std::shared_ptr<framework::BoxHelper>>(
       *m, "BoxPS")
-      .def(py::init([](paddle::framework::Dataset* dataset) {
-        return std::make_shared<paddle::framework::BoxHelper>(dataset);
+      .def(py::init([](paddle::framework::Dataset* dataset, int year, int month, int day) {
+        return std::make_shared<paddle::framework::BoxHelper>(dataset, year, month, day);
       }))
-      .def("begin_pass", &framework::BoxHelper::BeginPass)
-      .def("end_pass", &framework::BoxHelper::EndPass)
-      .def("wait_feed_pass_done", &framework::BoxHelper::WaitFeedPassDone)
-      .def("preload_into_memory", &framework::BoxHelper::PreLoadIntoMemory)
-      .def("load_into_memory", &framework::BoxHelper::LoadIntoMemory);
+      .def("begin_pass", &framework::BoxHelper::BeginPass, py::call_guard<py::gil_scoped_release>())
+      .def("end_pass", &framework::BoxHelper::EndPass, py::call_guard<py::gil_scoped_release>())
+      .def("wait_feed_pass_done", &framework::BoxHelper::WaitFeedPassDone, py::call_guard<py::gil_scoped_release>())
+      .def("preload_into_memory", &framework::BoxHelper::PreLoadIntoMemory, py::call_guard<py::gil_scoped_release>())
+      .def("load_into_memory", &framework::BoxHelper::LoadIntoMemory, py::call_guard<py::gil_scoped_release>());
 }  // end BoxHelper
+
+void BindBoxWrapper(py::module* m) {
+  py::class_<framework::BoxWrapper, std::shared_ptr<framework::BoxWrapper>>(
+      *m, "BoxWrapper")
+      .def(py::init([]() {
+        // return std::make_shared<paddle::framework::BoxHelper>(dataset);
+        return framework::BoxWrapper::GetInstance();
+      }))
+      .def("save_model", &framework::BoxWrapper::SaveModel)
+      .def("initialize_gpu", &framework::BoxWrapper::InitializeGPU)
+      .def("finalize", &framework::BoxWrapper::Finalize);
+}  // end BoxWrapper
 }  // end namespace pybind
 }  // end namespace paddle

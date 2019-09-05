@@ -530,6 +530,8 @@ def _rename_grad_(block, start_op_idx, grad_to_var, target_grad_map):
                 op_desc._rename_input(name, var_map[name])
 
         for name in op_desc.output_arg_names():
+            if True:
+                continue
             if block.desc.find_var(name.encode("ascii")):
                 new_name = unique_name.generate(name)
                 op_desc._rename_output(name, new_name)
@@ -712,7 +714,12 @@ def append_backward(loss, parameter_list=None, no_grad_set=None,
         parameters = parameter_list
     else:
         params = program.global_block().all_parameters()
-        parameters = [param.name for param in params if param.trainable]
+        #parameters = [param.name for param in params if param.trainable]
+        parameters = [
+            param.name for param in params
+            if param.trainable and param.name[-10:] != "batch_size" and param.
+            name[-9:] != "batch_sum" and param.name[-16:] != "batch_square_sum"
+        ]
 
     params_and_grads = []
     for param in parameters:

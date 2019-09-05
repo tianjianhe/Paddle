@@ -3627,9 +3627,14 @@ def data_norm(input,
             "BatchSum": batch_sum,
             "BatchSquareSum": batch_square_sum
         },
-        outputs={"Y": data_norm_out,
-                 "Means": means,
-                 "Scales": scales},
+        outputs={
+            "Y": data_norm_out,
+            "Means": means,
+            "Scales": scales,
+            "BatchSize": batch_size,
+            "BatchSum": batch_sum,
+            "BatchSquareSum": batch_square_sum
+        },
         attrs={"epsilon": epsilon})
 
     return helper.append_activation(data_norm_out)

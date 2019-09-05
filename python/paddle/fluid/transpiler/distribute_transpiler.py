@@ -323,8 +323,10 @@ class DistributeTranspiler(object):
         else:
             raise ValueError('invalid trainers config: ' + str(trainers))
 
+        print("endpoints" + str(endpoints))
         if len(endpoints) == 1:
-            raise ValueError('invalid trainer number in distributed: 1')
+            pass
+        #raise ValueError('invalid trainer number in distributed: 1')
 
         if startup_program is None:
             startup_program = default_startup_program()
@@ -411,7 +413,7 @@ class DistributeTranspiler(object):
                   trainer_id,
                   program=None,
                   pservers="127.0.0.1:6174",
-                  trainers=1,
+                  trainers="127.0.0.1:6174",
                   sync_mode=True,
                   startup_program=None,
                   current_endpoint="127.0.0.1:6174"):
@@ -487,6 +489,8 @@ class DistributeTranspiler(object):
             return
 
         if self.config.mode == "collective":
+            print("trainers: " + str(trainers))
+            print("trainer_id: " + str(trainer_id))
             self._transpile_collective(
                 collective_mode=self.config.collective_mode,
                 trainer_id=trainer_id,

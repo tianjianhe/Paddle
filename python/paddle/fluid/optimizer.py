@@ -1328,6 +1328,7 @@ class AdamOptimizer(Optimizer):
     """
     _moment1_acc_str = "moment1"
     _moment2_acc_str = "moment2"
+    _moment3_acc_str = "moment3"
     _beta1_pow_acc_str = "beta1_pow_acc"
     _beta2_pow_acc_str = "beta2_pow_acc"
 
@@ -1360,6 +1361,8 @@ class AdamOptimizer(Optimizer):
         for p in parameters:
             self._add_accumulator(self._moment1_acc_str, p)
             self._add_accumulator(self._moment2_acc_str, p)
+            # moment3 actually just has one dimension
+            self._add_accumulator(self._moment3_acc_str, p)
             self._add_accumulator(
                 name=self._beta1_pow_acc_str,
                 param=p,
@@ -1380,6 +1383,8 @@ class AdamOptimizer(Optimizer):
                                         param_and_grad[0])
         moment2 = self._get_accumulator(self._moment2_acc_str,
                                         param_and_grad[0])
+        moment3 = self._get_accumulator(self._moment3_acc_str,
+                                        param_and_grad[0])
         beta1_pow_acc = self._get_accumulator(self._beta1_pow_acc_str,
                                               param_and_grad[0])
         beta2_pow_acc = self._get_accumulator(self._beta2_pow_acc_str,
@@ -1394,13 +1399,15 @@ class AdamOptimizer(Optimizer):
                 "LearningRate": self._create_param_lr(param_and_grad),
                 "Moment1": moment1,
                 "Moment2": moment2,
+                "Moment3": moment3,
                 "Beta1Pow": beta1_pow_acc,
                 "Beta2Pow": beta2_pow_acc
             },
             outputs={
                 "ParamOut": param_and_grad[0],
                 "Moment1Out": moment1,
-                "Moment2Out": moment2
+                "Moment2Out": moment2,
+                "Moment3Out": moment3
             },
             attrs={
                 "beta1": self._beta1,
@@ -2945,9 +2952,14 @@ class PipelineOptimizer(object):
         self._optimizer.minimize(loss, startup_program, parameter_list,
                                  no_grad_set)
         program = loss.block.program
-        program_list = self._split_program(program, self._cut_list)
-        for p in program_list:
-            self._create_vars(p["program"].block(0), program)
+        if len(self._cut_list) == 0:
+            program_list = []
+            ptmp = {"program": program, "input_set": set(), "output_set": set()}
+            program_list.append(ptmp)
+        else:
+            program_list = self._split_program(program, self._cut_list)
+            for p in program_list:
+                self._create_vars(p["program"].block(0), program)
         whole_parameters = [e.name for e in program.block(0).all_parameters()]
         param_need_sync = []
         for i, section_p in enumerate(program_list):
@@ -2955,7 +2967,16 @@ class PipelineOptimizer(object):
                 continue
             section_var = [e for e in section_p["program"].block(0).vars]
             for p in section_var:
-                if p in whole_parameters:
+                if p in whole_parameters or \
+                        p[0:5] == "learn" or \
+                        p[0:6] == "sync_p" or \
+   p.find("beta1_pow_acc_") != -1 or \
+   p.find("beta2_pow_acc_") != -1 or \
+   p.find("moment1_") != -1 or \
+   p.find("moment3_") != -1 or \
+   p.find("moment2_") != -1:
+                    #Workaround(learn): copy lr to all gpu
+                    #Workaround(sync_p): copy sync_push to all gpu
                     param_need_sync.append(p)
         program._pipeline_opt = {
             "trainer": "PipelineTrainer",
