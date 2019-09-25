@@ -158,12 +158,17 @@ class BoxHelper {
     VLOG(3) << "Before ReadAll";
     input_channel_->ReadAll(pass_data);
     VLOG(3) << "After ReadAll";
+
+    int ins_id = 0;
+    auto& index_map = dataset_->GetReaders()[0]->index_omited_in_feedpass_;
     for (const auto& ins : pass_data) {
+      ins_id++;
+      if (ins_id % 10000 == 0) {
+        VLOG(0) << "box_helper, doing " << ins_id;
+      }
       const auto& feasign_v = ins.uint64_feasigns_;
       for (const auto feasign : feasign_v) {
-        if (dataset_->GetReaders()[0]->index_omited_in_feedpass_.find(
-                feasign.slot()) !=
-            dataset_->GetReaders()[0]->index_omited_in_feedpass_.end()) {
+        if (index_map.find(feasign.slot()) != index_map.end()) {
           continue;
         }
         feasign_to_box.push_back(feasign.sign().uint64_feasign_);
