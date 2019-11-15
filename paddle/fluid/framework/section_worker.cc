@@ -157,6 +157,8 @@ void SectionWorker::TrainFiles() {
       if (batch_size <= 0) {
         break;
       }
+      auto box_ptr = BoxWrapper::GetInstance();
+      box_ptr->batch_size_ = batch_size;
       SEC_LOG << "read batch size: " << batch_size;
     } else {
       // TODO(hutuxian): Keep batch_size in scope? Or is there a better way to

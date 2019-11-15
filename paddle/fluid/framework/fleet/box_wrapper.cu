@@ -147,7 +147,7 @@ __global__ void PullCopy(float** dest, abacus::FeatureValueGpu* src,
 
 __global__ void PushCopy(abacus::FeaturePushValueGpu* dest, float** src,
                          int64_t* len, int hidden, int slot_num,
-                         int total_len) {
+                         int total_len, int bs) {
   CUDA_KERNEL_LOOP(i, total_len) {
     int low = 0;
     int high = slot_num - 1;
@@ -162,9 +162,9 @@ __global__ void PushCopy(abacus::FeaturePushValueGpu* dest, float** src,
     int y = i - (x ? len[low - 1] : 0);
     (dest + i)->show = *(src[x] + y * hidden);
     (dest + i)->clk = *(src[x] + y * hidden + 1);
-    (dest + i)->embed_g = *(src[x] + y * hidden + 2) * -1.;
+    (dest + i)->embed_g = *(src[x] + y * hidden + 2) * -1. * bs;
     for (int j = 0; j < 8; j++) {
-      (dest + i)->embedx_g[j] = *(src[x] + y * hidden + 3 + j) * -1.;
+      (dest + i)->embedx_g[j] = *(src[x] + y * hidden + 3 + j) * -1. * bs;
     }
   }
 }
@@ -399,9 +399,12 @@ void BoxWrapper::PushSparseGrad(const paddle::platform::Place& place,
                grad_values.size() * sizeof(float*), cudaMemcpyHostToDevice);
     cudaMemcpy(gpu_len, slot_lengths_lod.data(),
                slot_lengths.size() * sizeof(int64_t), cudaMemcpyHostToDevice);
+
+  auto box_ptr = BoxWrapper::GetInstance();
+  int bs = box_ptr->batch_size_;
     PushCopy<<<(total_length + 512 - 1) / 512, 512, 0, stream>>>(
         total_grad_values_gpu, gpu_values, gpu_len, hidden_size,
-        slot_lengths.size(), total_length);
+        slot_lengths.size(), total_length, bs);
     cudaStreamSynchronize(stream);
 
     // only support gpu for paddlebox

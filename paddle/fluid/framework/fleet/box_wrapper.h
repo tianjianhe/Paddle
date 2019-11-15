@@ -193,6 +193,7 @@ class BoxWrapper {
   std::mutex add_mutex;
 
  public:
+  int batch_size_;
   static std::shared_ptr<BasicAucCalculator> cal_;
 };
 
