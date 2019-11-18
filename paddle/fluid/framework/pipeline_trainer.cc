@@ -234,8 +234,6 @@ void PipelineTrainer::construct_sync_functor() {
 
 void PipelineTrainer::Run() {
   VLOG(3) << "Going to run";
-  auto box_ptr = BoxWrapper::GetInstance();
-  box_ptr->cal_->reset();
   for (int i = 0; i < section_num_; ++i) {
     for (int j = 0; j < pipeline_num_; ++j) {
       for (size_t k = 0; k < workers_[i][j].size(); ++k) {
@@ -255,19 +253,48 @@ void PipelineTrainer::Finalize() {
   for (auto& th : section_threads_) {
     th.join();
   }
+
+  // print AUC
   auto box_ptr = BoxWrapper::GetInstance();
+  BasicAucCalculator *day_cal_ = nullptr;
+  if (box_ptr->cal_->pass_id % 2) {
+    day_cal_ = box_ptr->day_join_cal_.get();
+  } else {
+    day_cal_ = box_ptr->day_update_cal_.get();
+  }
   box_ptr->cal_->calculate_bucket_error();
   box_ptr->cal_->compute();
   fprintf(stderr,
           "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
           "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
-          box_ptr->cal_->is_join++ % 2 ? "pass_ctr_join_model"
+          box_ptr->cal_->pass_id++ % 2 ? "pass_ctr_join_model"
                                        : "pass_ctr_update_model",
           box_ptr->cal_->auc(), box_ptr->cal_->bucket_error(),
           box_ptr->cal_->mae(), box_ptr->cal_->rmse(),
           box_ptr->cal_->actual_ctr(), box_ptr->cal_->predicted_ctr(),
           box_ptr->cal_->actual_ctr() / box_ptr->cal_->predicted_ctr(),
           box_ptr->cal_->size());
+  box_ptr->cal_->reset();
+
+  day_cal_->calculate_bucket_error();
+  day_cal_->compute();
+  fprintf(stderr,
+          "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
+          "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f",
+          box_ptr->cal_->pass_id % 2 ? "day_ctr_update_model"
+                                       : "day_ctr_join_model",
+          day_cal_->auc(), day_cal_->bucket_error(),
+          day_cal_->mae(), day_cal_->rmse(),
+          day_cal_->actual_ctr(), day_cal_->predicted_ctr(),
+          day_cal_->actual_ctr() / day_cal_->predicted_ctr(),
+          day_cal_->size());
+  if (day_cal_->pass_id++ % 96 == 0) {
+    // last pass in a day
+    fprintf(stderr, " [last_pass]\n");
+    day_cal_->reset();
+  } else {
+    fprintf(stderr, "\n");
+  }
   for (const auto& var : *param_need_sync_) {
     auto* root_tensor = root_scope_->Var(var)->GetMutable<LoDTensor>();
     // TODO(hutuxian): Add a final all-reduce?

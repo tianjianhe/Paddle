@@ -40,7 +40,7 @@ class BasicAucCalculator {
   BasicAucCalculator() {}
   void init(int table_size) {
     set_table_size(table_size);
-    is_join = 1;
+    pass_id = 1;
   }
   void reset() {
     for (int i = 0; i < 2; i++) {
@@ -80,7 +80,7 @@ class BasicAucCalculator {
   double& local_sqrerr() { return _local_sqrerr; }
   double& local_pred() { return _local_pred; }
   void calculate_bucket_error();
-  int is_join;
+  int pass_id;
 
  protected:
   double _local_abserr = 0;
@@ -171,7 +171,11 @@ class BoxWrapper {
         VLOG(3) << "s_instance_ is null";
         s_instance_.reset(new paddle::framework::BoxWrapper());
         s_instance_->cal_.reset(new BasicAucCalculator());
+        s_instance_->day_join_cal_.reset(new BasicAucCalculator());
+        s_instance_->day_update_cal_.reset(new BasicAucCalculator());
         s_instance_->cal_->init(1000000);
+        s_instance_->day_join_cal_->init(1000000);
+        s_instance_->day_update_cal_->init(1000000);
 #ifdef PADDLE_WITH_BOX_PS
         s_instance_->boxps_ptr_.reset(boxps::BoxPSBase::GetIns());
 #endif
@@ -195,6 +199,8 @@ class BoxWrapper {
  public:
   int batch_size_;
   static std::shared_ptr<BasicAucCalculator> cal_;
+  static std::shared_ptr<BasicAucCalculator> day_join_cal_;
+  static std::shared_ptr<BasicAucCalculator> day_update_cal_;
 };
 
 class BoxHelper {

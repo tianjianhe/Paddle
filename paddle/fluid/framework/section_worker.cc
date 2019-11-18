@@ -217,6 +217,14 @@ void SectionWorker::TrainFiles() {
       auto* gpu_actual_data = actual_tensor.data<int64_t>();
       auto* gpu_pred_data = pred_tensor.data<float>();
       auto box_ptr = BoxWrapper::GetInstance();
+
+      BasicAucCalculator *day_cal_ = nullptr;
+      if (box_ptr->cal_->pass_id % 2) {
+        day_cal_ = box_ptr->day_join_cal_.get();
+      } else {
+        day_cal_ = box_ptr->day_update_cal_.get();
+      }
+
       int64_t actual_data[4099];
       float pred_data[4099];
       auto len = actual_tensor.numel();
@@ -226,6 +234,7 @@ void SectionWorker::TrainFiles() {
                  cudaMemcpyDeviceToHost);
       for (auto i = 0; i < len; ++i) {
         box_ptr->cal_->add_data(pred_data[i], actual_data[i]);
+        day_cal_->add_data(pred_data[i], actual_data[i]);
       }
     }
 
