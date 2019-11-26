@@ -237,7 +237,7 @@ bool InMemoryDataFeed<T>::Start() {
   if (output_channel_->Size() == 0 && input_channel_->Size() != 0) {
     std::vector<T> data;
     input_channel_->Read(data);
-    printf("htj, channel size: %d\n", static_cast<int>(data.size()));
+    fprintf(stderr, "htj, channel size: %d\n", static_cast<int>(data.size()));
     output_channel_->Write(std::move(data));
   }
 #endif

@@ -195,8 +195,7 @@ void DatasetImpl<T>::LoadIntoMemory() {
   // input_channel_->SetBlockSize(in_chan_size / thread_num_);
   input_channel_->SetBlockSize(in_chan_size /
                                paddle::platform::GetCUDADeviceCount());
-  printf("htj in_chan_size: %d, thread_num: %d\n", (int)in_chan_size,
-         (int)thread_num_);
+  fprintf(stderr, "htj in_chan_size: %d, thread_num: %d\n", (int)in_chan_size, (int)thread_num_);
   // input_channel_->SetBlockSize(in_chan_size / thread_num_ + 1);
   timeline.Pause();
   VLOG(3) << "DatasetImpl<T>::LoadIntoMemory() end"

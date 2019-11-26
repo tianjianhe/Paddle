@@ -269,7 +269,7 @@ void PipelineTrainer::Finalize() {
   box_ptr->ubm_cal_->calculate_bucket_error();
   box_ptr->cal_->compute();
   box_ptr->ubm_cal_->compute();
-  fprintf(stderr,
+  fprintf(stdout,
           "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
           "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
           box_ptr->cal_->pass_id++ % 2 ? "pass_ctr_join_model"
@@ -280,7 +280,7 @@ void PipelineTrainer::Finalize() {
           box_ptr->cal_->actual_ctr() / box_ptr->cal_->predicted_ctr(),
           box_ptr->cal_->size());
   box_ptr->cal_->reset();
-  fprintf(stderr,
+  fprintf(stdout,
           "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
           "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
           box_ptr->ubm_cal_->pass_id++ % 2 ? "pass_ubm_join_model"
@@ -297,7 +297,7 @@ void PipelineTrainer::Finalize() {
   day_ubm_cal_->calculate_bucket_error();
   day_ubm_cal_->compute();
   if (day_cal_->pass_id++ % 96 == 0) {
-    fprintf(stderr,
+    fprintf(stdout,
           "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
           "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
           box_ptr->cal_->pass_id % 2 ? "day_ctr_update_model"
@@ -308,7 +308,7 @@ void PipelineTrainer::Finalize() {
           day_cal_->actual_ctr() / day_cal_->predicted_ctr(),
           day_cal_->size());
     day_cal_->reset();
-    fprintf(stderr,
+    fprintf(stdout,
           "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
           "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
           box_ptr->ubm_cal_->pass_id % 2 ? "day_ubm_update_model"
