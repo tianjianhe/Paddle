@@ -152,7 +152,7 @@ __global__ void PullCopy(float** dest, abacus::FeatureValueGpu* src,
 
 __global__ void PushCopy(abacus::FeaturePushValueGpu* dest, float** src,
                          int64_t* len, int hidden, int slot_num,
-                         int total_len, int bs) {
+                         int total_len, int bs, int* slot_vector) {
   CUDA_KERNEL_LOOP(i, total_len) {
     int low = 0;
     int high = slot_num - 1;
@@ -165,6 +165,7 @@ __global__ void PushCopy(abacus::FeaturePushValueGpu* dest, float** src,
     }
     int x = low;
     int y = i - (x ? len[low - 1] : 0);
+    (dest + i)->slot = slot_vector[x];
     (dest + i)->show = *(src[x] + y * hidden);
     (dest + i)->clk = *(src[x] + y * hidden + 1);
     (dest + i)->embed_g = *(src[x] + y * hidden + 2) * -1. * bs;
@@ -183,6 +184,10 @@ void BoxWrapper::FeedPass(int date, const std::vector<uint64_t>& feasgin_to_box)
 
 void BoxWrapper::BeginPass() const {
 #ifdef PADDLE_WITH_BOX_PS
+  size_t total = 0;
+  size_t available = 0;
+  platform::GpuMemoryUsage(&available, &total);
+  PADDLEBOX_LOG << "[GPU MEM] available[" << available << "] total[" << total << "]";
   int ret = boxps_ptr_->BeginPass();
   PADDLE_ENFORCE_EQ(ret, 0, "BeginPass failed in BoxPS.");
 #endif
@@ -399,6 +404,10 @@ void BoxWrapper::PushSparseGrad(const paddle::platform::Place& place,
         memory::AllocShared(place, slot_lengths.size() * sizeof(int64_t));
     float** gpu_values = reinterpret_cast<float**>(buf1->ptr());
     int64_t* gpu_len = reinterpret_cast<int64_t*>(buf2->ptr());
+    buf = memory::AllocShared(place, _slot_index * sizeof(int));
+    _d_slot_vector = reinterpret_cast<int*>(buf->ptr());
+    cudaMemcpy(_d_slot_vector, _slot_vector,
+            _slot_index * sizeof(int), cudaMemcpyHostToDevice);
 
     cudaMemcpy(gpu_values, grad_values.data(),
                grad_values.size() * sizeof(float*), cudaMemcpyHostToDevice);
@@ -409,7 +418,7 @@ void BoxWrapper::PushSparseGrad(const paddle::platform::Place& place,
   int bs = box_ptr->batch_size_;
     PushCopy<<<(total_length + 512 - 1) / 512, 512, 0, stream>>>(
         total_grad_values_gpu, gpu_values, gpu_len, hidden_size,
-        slot_lengths.size(), total_length, bs);
+        slot_lengths.size(), total_length, bs, _d_slot_vector);
     cudaStreamSynchronize(stream);
 
     // only support gpu for paddlebox

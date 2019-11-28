@@ -131,6 +131,15 @@ class BoxWrapper {
                       const std::vector<int64_t>& slot_lengths,
                       const int hidden_size);
   void InitializeGPU(const char* conf_file) {
+    std::ifstream fin("./slot.txt");
+    _slot_index = 0;
+    int slot = 0;
+    while (fin >> slot) {
+        _slot_vector[_slot_index++] = slot;
+        PADDLE_ENFORCE(_slot_index < SLOT_NUM_MAX,
+                "slot_index should be less than SLOT_NUM_MAX");
+    }
+
     if (nullptr != s_instance_) {
       PADDLEBOX_LOG << "Begin InitializeGPU";
 #ifdef PADDLE_WITH_BOX_PS
@@ -159,7 +168,18 @@ class BoxWrapper {
       s_instance_->boxps_ptr_->Finalize();
     }
   }
-  void SaveModel() const { printf("savemodel in box_Wrapper\n"); }
+  void SaveBase(const char* batch_model_path, const char* xbox_model_path,
+          boxps::SaveModelStat& stat) {
+    if (nullptr != s_instance_) {
+      s_instance_->boxps_ptr_->SaveBase(batch_model_path, xbox_model_path, stat);
+    }
+  }
+
+  void SaveDelta(const char* xbox_model_path, boxps::SaveModelStat& stat) {
+    if (nullptr != s_instance_) {
+      s_instance_->boxps_ptr_->SaveDelta(xbox_model_path, stat);
+    }
+  }
   void LoadModel() const { printf("loadmodel in box\n"); }
 
   static std::shared_ptr<BoxWrapper> GetInstance() {
@@ -201,6 +221,10 @@ class BoxWrapper {
   std::atomic<int64_t> actual_click;
   float pred_click;
   std::mutex add_mutex;
+  static const int SLOT_NUM_MAX = 512;
+  int _slot_vector[SLOT_NUM_MAX];
+  int _slot_index;
+  int* _d_slot_vector;
 
  public:
   int batch_size_;
