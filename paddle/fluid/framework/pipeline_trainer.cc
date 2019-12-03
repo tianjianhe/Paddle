@@ -256,15 +256,6 @@ void PipelineTrainer::Finalize() {
 
   // print AUC
   auto box_ptr = BoxWrapper::GetInstance();
-  BasicAucCalculator *day_cal_ = nullptr;
-  BasicAucCalculator *day_ubm_cal_ = nullptr;
-  if (box_ptr->cal_->pass_id % 2) {
-    day_cal_ = box_ptr->day_join_cal_.get();
-    day_ubm_cal_ = box_ptr->day_ubm_join_cal_.get();
-  } else {
-    day_cal_ = box_ptr->day_update_cal_.get();
-    day_ubm_cal_ = box_ptr->day_ubm_update_cal_.get();
-  }
   box_ptr->cal_->calculate_bucket_error();
   box_ptr->ubm_cal_->calculate_bucket_error();
   box_ptr->cal_->compute();
@@ -292,34 +283,6 @@ void PipelineTrainer::Finalize() {
           box_ptr->ubm_cal_->size());
   box_ptr->ubm_cal_->reset();
 
-  day_cal_->calculate_bucket_error();
-  day_cal_->compute();
-  day_ubm_cal_->calculate_bucket_error();
-  day_ubm_cal_->compute();
-  if (day_cal_->pass_id++ % 96 == 0) {
-    fprintf(stdout,
-          "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
-          "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
-          box_ptr->cal_->pass_id % 2 ? "day_ctr_update_model"
-                                       : "day_ctr_join_model",
-          day_cal_->auc(), day_cal_->bucket_error(),
-          day_cal_->mae(), day_cal_->rmse(),
-          day_cal_->actual_ctr(), day_cal_->predicted_ctr(),
-          day_cal_->actual_ctr() / day_cal_->predicted_ctr(),
-          day_cal_->size());
-    day_cal_->reset();
-    fprintf(stdout,
-          "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
-          "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
-          box_ptr->ubm_cal_->pass_id % 2 ? "day_ubm_update_model"
-                                       : "day_ubm_join_model",
-          day_ubm_cal_->auc(), day_ubm_cal_->bucket_error(),
-          day_ubm_cal_->mae(), day_ubm_cal_->rmse(),
-          day_ubm_cal_->actual_ctr(), day_ubm_cal_->predicted_ctr(),
-          day_ubm_cal_->actual_ctr() / day_ubm_cal_->predicted_ctr(),
-          day_ubm_cal_->size());
-    day_ubm_cal_->reset();
-  }
   for (const auto& var : *param_need_sync_) {
     auto* root_tensor = root_scope_->Var(var)->GetMutable<LoDTensor>();
     // TODO(hutuxian): Add a final all-reduce?

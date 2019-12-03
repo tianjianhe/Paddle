@@ -209,6 +209,27 @@ class BoxWrapper {
     }
     return s_instance_;
   }
+  void PrintTmp(BasicAucCalculator *day_cal_, std::string name) {
+      day_cal_->calculate_bucket_error();
+      day_cal_->compute();
+      fprintf(stdout,
+              "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
+              "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
+              name.c_str(),
+              day_cal_->auc(), day_cal_->bucket_error(),
+              day_cal_->mae(), day_cal_->rmse(),
+              day_cal_->actual_ctr(), day_cal_->predicted_ctr(),
+              day_cal_->actual_ctr() / day_cal_->predicted_ctr(),
+              day_cal_->size());
+        day_cal_->reset();
+  }
+  void PrintMetric() {
+      auto box_ptr = GetInstance();
+      PrintTmp(box_ptr->day_join_cal_.get(), "day_ctr_join");
+      PrintTmp(box_ptr->day_ubm_join_cal_.get(), "day_ubm_join");
+      PrintTmp(box_ptr->day_update_cal_.get(), "day_ctr_update");
+      PrintTmp(box_ptr->day_ubm_update_cal_.get(), "day_ubm_update");
+  }
 
  private:
 #ifdef PADDLE_WITH_BOX_PS

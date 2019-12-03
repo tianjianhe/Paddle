@@ -36,6 +36,8 @@ class BoxWrapper(object):
             raise TypeError(
                 "conf_file in parameter of initialize_gpu should be str")
         self.box_wrapper.initialize_gpu(conf_file)
+    def print_metric(self):
+        self.box_wrapper.print_metric()
 
     def finalize(self):
         self.box_wrapper.finalize()

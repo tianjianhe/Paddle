@@ -60,6 +60,7 @@ void BindBoxWrapper(py::module* m) {
       .def("save_base", &framework::BoxWrapper::SaveBase)
       .def("save_delta", &framework::BoxWrapper::SaveDelta)
       .def("initialize_gpu", &framework::BoxWrapper::InitializeGPU)
+      .def("print_metric", &framework::BoxWrapper::PrintMetric)
       .def("finalize", &framework::BoxWrapper::Finalize);
 }  // end BoxWrapper
 
