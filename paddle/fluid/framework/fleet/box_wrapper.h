@@ -190,18 +190,6 @@ class BoxWrapper {
       if (nullptr == s_instance_) {
         VLOG(3) << "s_instance_ is null";
         s_instance_.reset(new paddle::framework::BoxWrapper());
-        s_instance_->cal_.reset(new BasicAucCalculator());
-        s_instance_->ubm_cal_.reset(new BasicAucCalculator());
-        s_instance_->day_join_cal_.reset(new BasicAucCalculator());
-        s_instance_->day_update_cal_.reset(new BasicAucCalculator());
-        s_instance_->day_ubm_join_cal_.reset(new BasicAucCalculator());
-        s_instance_->day_ubm_update_cal_.reset(new BasicAucCalculator());
-        s_instance_->cal_->init(1000000);
-        s_instance_->ubm_cal_->init(1000000);
-        s_instance_->day_join_cal_->init(1000000);
-        s_instance_->day_update_cal_->init(1000000);
-        s_instance_->day_ubm_join_cal_->init(1000000);
-        s_instance_->day_ubm_update_cal_->init(1000000);
 #ifdef PADDLE_WITH_BOX_PS
         s_instance_->boxps_ptr_.reset(boxps::BoxPSBase::GetIns());
 #endif
@@ -209,28 +197,66 @@ class BoxWrapper {
     }
     return s_instance_;
   }
-  void PrintTmp(BasicAucCalculator *day_cal_, std::string name) {
-      day_cal_->calculate_bucket_error();
-      day_cal_->compute();
-      fprintf(stdout,
-              "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
-              "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
-              name.c_str(),
-              day_cal_->auc(), day_cal_->bucket_error(),
-              day_cal_->mae(), day_cal_->rmse(),
-              day_cal_->actual_ctr(), day_cal_->predicted_ctr(),
-              day_cal_->actual_ctr() / day_cal_->predicted_ctr(),
-              day_cal_->size());
-        day_cal_->reset();
-  }
-  void PrintMetric() {
-      auto box_ptr = GetInstance();
-      PrintTmp(box_ptr->day_join_cal_.get(), "day_ctr_join");
-      PrintTmp(box_ptr->day_ubm_join_cal_.get(), "day_ubm_join");
-      PrintTmp(box_ptr->day_update_cal_.get(), "day_ctr_update");
-      PrintTmp(box_ptr->day_ubm_update_cal_.get(), "day_ubm_update");
+
+  struct MetricMsg {
+   public:
+    MetricMsg() {}
+    MetricMsg(const std::string& label_varname, const std::string& pred_varname,
+              int is_join, int bucket_size = 1000000)
+        : label_varname_(label_varname),
+          pred_varname_(pred_varname),
+          is_join_(is_join) {
+      calculator = new BasicAucCalculator();
+      calculator->init(bucket_size);
+    }
+    const std::string& LabelVarname() const { return label_varname_; }
+    const std::string& PredVarname() const { return pred_varname_; }
+    int IsJoin() const { return is_join_; }
+    BasicAucCalculator* GetCalculator() { return calculator; }
+
+   private:
+    std::string label_varname_;
+    std::string pred_varname_;
+    int is_join_;
+    BasicAucCalculator* calculator;
+  };
+
+  int PassFlag() const { return pass_flag_; }
+  void FlipPassFlag() { pass_flag_ = 1 - pass_flag_; }
+  bool NeedMetric() const { return need_metric_; }
+  std::map<std::string, MetricMsg>& GetMetricList() { return metric_lists_; }
+
+  void InitMetric(const std::string& name, const std::string& label_varname,
+                  const std::string& pred_varname, bool is_join,
+                  int bucket_size = 1000000) {
+    metric_lists_.emplace(name, MetricMsg(label_varname, pred_varname,
+                                          is_join ? 1 : 0, bucket_size));
+    need_metric_ = true;
   }
 
+  const std::vector<float> GetMetricMsg(const std::string& name) {
+    const auto iter = metric_lists_.find(name);
+    if (iter == metric_lists_.end()) {
+      PADDLE_THROW("The metric name you provided [%s] is not registered.", name.c_str());
+    }
+
+    std::vector<float> metric_return_values_(8, 0.0);
+    auto* auc_cal_ = iter->second.GetCalculator();
+    auc_cal_->calculate_bucket_error();
+    auc_cal_->compute();
+    metric_return_values_[0] = auc_cal_->auc();
+    metric_return_values_[1] = auc_cal_->bucket_error();
+    metric_return_values_[2] = auc_cal_->mae();
+    metric_return_values_[3] = auc_cal_->rmse();
+    metric_return_values_[4] = auc_cal_->actual_ctr();
+    metric_return_values_[5] = auc_cal_->predicted_ctr();
+    metric_return_values_[6] =
+        auc_cal_->actual_ctr() / auc_cal_->predicted_ctr();
+    metric_return_values_[7] = auc_cal_->size();
+    auc_cal_->reset();
+
+    return metric_return_values_;
+  }
  private:
 #ifdef PADDLE_WITH_BOX_PS
   static cudaStream_t stream_list_[8];
@@ -238,10 +264,6 @@ class BoxWrapper {
 #endif
   static std::shared_ptr<BoxWrapper> s_instance_;
   int GetDate() const;
-  // will be failed when multi datasets run concurrently.
-  std::atomic<int64_t> actual_click;
-  float pred_click;
-  std::mutex add_mutex;
   static const int SLOT_NUM_MAX = 512;
   int _slot_vector[SLOT_NUM_MAX];
   int _slot_index;
@@ -249,12 +271,11 @@ class BoxWrapper {
 
  public:
   int batch_size_;
-  static std::shared_ptr<BasicAucCalculator> cal_;
-  static std::shared_ptr<BasicAucCalculator> ubm_cal_;
-  static std::shared_ptr<BasicAucCalculator> day_join_cal_;
-  static std::shared_ptr<BasicAucCalculator> day_update_cal_;
-  static std::shared_ptr<BasicAucCalculator> day_ubm_join_cal_;
-  static std::shared_ptr<BasicAucCalculator> day_ubm_update_cal_;
+ private:
+  // Metric Related
+  int pass_flag_ = 1;  // join: 1, update: 0
+  bool need_metric_ = false;
+  std::map<std::string, MetricMsg> metric_lists_;
 };
 
 class BoxHelper {

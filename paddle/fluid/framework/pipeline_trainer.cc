@@ -254,35 +254,6 @@ void PipelineTrainer::Finalize() {
     th.join();
   }
 
-  // print AUC
-  auto box_ptr = BoxWrapper::GetInstance();
-  box_ptr->cal_->calculate_bucket_error();
-  box_ptr->ubm_cal_->calculate_bucket_error();
-  box_ptr->cal_->compute();
-  box_ptr->ubm_cal_->compute();
-  fprintf(stdout,
-          "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
-          "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
-          box_ptr->cal_->pass_id++ % 2 ? "pass_ctr_join_model"
-                                       : "pass_ctr_update_model",
-          box_ptr->cal_->auc(), box_ptr->cal_->bucket_error(),
-          box_ptr->cal_->mae(), box_ptr->cal_->rmse(),
-          box_ptr->cal_->actual_ctr(), box_ptr->cal_->predicted_ctr(),
-          box_ptr->cal_->actual_ctr() / box_ptr->cal_->predicted_ctr(),
-          box_ptr->cal_->size());
-  box_ptr->cal_->reset();
-  fprintf(stdout,
-          "%s: AUC=%.6f BUCKET_ERROR=%.6f MAE=%.6f RMSE=%.6f "
-          "Actual CTR=%.6f Predicted CTR=%.6f COPC=%.6f INS Count=%.0f\n",
-          box_ptr->ubm_cal_->pass_id++ % 2 ? "pass_ubm_join_model"
-                                       : "pass_ubm_update_model",
-          box_ptr->ubm_cal_->auc(), box_ptr->ubm_cal_->bucket_error(),
-          box_ptr->ubm_cal_->mae(), box_ptr->ubm_cal_->rmse(),
-          box_ptr->ubm_cal_->actual_ctr(), box_ptr->ubm_cal_->predicted_ctr(),
-          box_ptr->ubm_cal_->actual_ctr() / box_ptr->ubm_cal_->predicted_ctr(),
-          box_ptr->ubm_cal_->size());
-  box_ptr->ubm_cal_->reset();
-
   for (const auto& var : *param_need_sync_) {
     auto* root_tensor = root_scope_->Var(var)->GetMutable<LoDTensor>();
     // TODO(hutuxian): Add a final all-reduce?

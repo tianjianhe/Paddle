@@ -60,7 +60,12 @@ void BindBoxWrapper(py::module* m) {
       .def("save_base", &framework::BoxWrapper::SaveBase)
       .def("save_delta", &framework::BoxWrapper::SaveDelta)
       .def("initialize_gpu", &framework::BoxWrapper::InitializeGPU)
-      .def("print_metric", &framework::BoxWrapper::PrintMetric)
+      .def("init_metric", &framework::BoxWrapper::InitMetric,
+           py::call_guard<py::gil_scoped_release>())
+      .def("get_metric_msg", &framework::BoxWrapper::GetMetricMsg,
+           py::call_guard<py::gil_scoped_release>())
+      .def("flip_pass_flag", &framework::BoxWrapper::FlipPassFlag,
+           py::call_guard<py::gil_scoped_release>())
       .def("finalize", &framework::BoxWrapper::Finalize);
 }  // end BoxWrapper
 

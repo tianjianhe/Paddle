@@ -16,7 +16,6 @@ from . import core
 
 __all__ = ['BoxWrapper']
 
-
 class BoxWrapper(object):
     """
     box wrapper class
@@ -25,19 +24,32 @@ class BoxWrapper(object):
     def __init__(self):
         self.box_wrapper = core.BoxWrapper()
 
-    def save_base(self, batch_model_path, xbox_model_path, stat):
-        self.box_wrapper.save_base(batch_model_path, xbox_model_path, stat)
+    def save_model(self):
+        self.box_wrapper.save_model()
 
-    def save_delta(self, xbox_model_path, stat):
-        return self.box_wrapper.save_delta(xbox_model_path, stat)
-
-    def initialize_gpu(self, conf_file):
+    def initialize_gpu(self, conf_file, omit_var_list=None):
         if not isinstance(conf_file, str):
             raise TypeError(
                 "conf_file in parameter of initialize_gpu should be str")
-        self.box_wrapper.initialize_gpu(conf_file)
-    def print_metric(self):
-        self.box_wrapper.print_metric()
+        if omit_var_list is None:
+            omit_var_list = []
+        self.box_wrapper.initialize_gpu(conf_file, omit_var_list)
+
+    def init_metric(self,
+                    name,
+                    label_var,
+                    pred_var,
+                    is_join,
+                    bucket_size=1000000):
+        self.box_wrapper.init_metric(name, label_var, pred_var, is_join,
+                                     bucket_size)
+
+    def get_metric_msg(self, name):
+        return self.box_wrapper.get_metric_msg(name)
+
+    def flip_pass_flag(self):
+        self.box_wrapper.flip_pass_flag()
 
     def finalize(self):
         self.box_wrapper.finalize()
+

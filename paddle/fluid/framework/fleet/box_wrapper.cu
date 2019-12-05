@@ -24,12 +24,6 @@ namespace paddle {
 namespace framework {
 
 std::shared_ptr<BoxWrapper> BoxWrapper::s_instance_ = nullptr;
-std::shared_ptr<BasicAucCalculator> BoxWrapper::cal_ = nullptr;
-std::shared_ptr<BasicAucCalculator> BoxWrapper::ubm_cal_ = nullptr;
-std::shared_ptr<BasicAucCalculator> BoxWrapper::day_join_cal_ = nullptr;
-std::shared_ptr<BasicAucCalculator> BoxWrapper::day_update_cal_ = nullptr;
-std::shared_ptr<BasicAucCalculator> BoxWrapper::day_ubm_join_cal_ = nullptr;
-std::shared_ptr<BasicAucCalculator> BoxWrapper::day_ubm_update_cal_ = nullptr;
 #ifdef PADDLE_WITH_BOX_PS
 cudaStream_t BoxWrapper::stream_list_[8];
 std::shared_ptr<boxps::BoxPSBase> BoxWrapper::boxps_ptr_ = nullptr;
