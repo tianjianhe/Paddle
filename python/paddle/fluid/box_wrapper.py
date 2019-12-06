@@ -24,8 +24,11 @@ class BoxWrapper(object):
     def __init__(self):
         self.box_wrapper = core.BoxWrapper()
 
-    def save_model(self):
-        self.box_wrapper.save_model()
+    def save_base(self, batch_model_path, xbox_model_path, stat):
+        self.box_wrapper.save_base(batch_model_path, xbox_model_path, stat)
+
+    def save_delta(self, xbox_model_path, stat):
+        return self.box_wrapper.save_delta(xbox_model_path, stat)
 
     def initialize_gpu(self, conf_file):
         if not isinstance(conf_file, str):
