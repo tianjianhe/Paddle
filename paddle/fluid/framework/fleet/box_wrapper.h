@@ -267,7 +267,6 @@ class BoxWrapper {
   static const int SLOT_NUM_MAX = 512;
   int _slot_vector[SLOT_NUM_MAX];
   int _slot_index;
-  int* _d_slot_vector;
 
  public:
   int batch_size_;

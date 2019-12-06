@@ -27,13 +27,11 @@ class BoxWrapper(object):
     def save_model(self):
         self.box_wrapper.save_model()
 
-    def initialize_gpu(self, conf_file, omit_var_list=None):
+    def initialize_gpu(self, conf_file):
         if not isinstance(conf_file, str):
             raise TypeError(
                 "conf_file in parameter of initialize_gpu should be str")
-        if omit_var_list is None:
-            omit_var_list = []
-        self.box_wrapper.initialize_gpu(conf_file, omit_var_list)
+        self.box_wrapper.initialize_gpu(conf_file)
 
     def init_metric(self,
                     name,

@@ -398,9 +398,9 @@ void BoxWrapper::PushSparseGrad(const paddle::platform::Place& place,
         memory::AllocShared(place, slot_lengths.size() * sizeof(int64_t));
     float** gpu_values = reinterpret_cast<float**>(buf1->ptr());
     int64_t* gpu_len = reinterpret_cast<int64_t*>(buf2->ptr());
-    buf = memory::AllocShared(place, _slot_index * sizeof(int));
-    _d_slot_vector = reinterpret_cast<int*>(buf->ptr());
-    cudaMemcpy(_d_slot_vector, _slot_vector,
+    auto buf3 = memory::AllocShared(place, _slot_index * sizeof(int));
+    int* d_slot_vector = reinterpret_cast<int*>(buf3->ptr());
+    cudaMemcpy(d_slot_vector, _slot_vector,
             _slot_index * sizeof(int), cudaMemcpyHostToDevice);
 
     cudaMemcpy(gpu_values, grad_values.data(),
@@ -412,7 +412,7 @@ void BoxWrapper::PushSparseGrad(const paddle::platform::Place& place,
   int bs = box_ptr->batch_size_;
     PushCopy<<<(total_length + 512 - 1) / 512, 512, 0, stream>>>(
         total_grad_values_gpu, gpu_values, gpu_len, hidden_size,
-        slot_lengths.size(), total_length, bs, _d_slot_vector);
+        slot_lengths.size(), total_length, bs, d_slot_vector);
     cudaStreamSynchronize(stream);
 
     // only support gpu for paddlebox
